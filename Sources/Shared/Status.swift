@@ -101,6 +101,46 @@ private struct BreathingDot: NSViewRepresentable {
     }
 }
 
+/// Two rings that swell out of a tile and fade, once: an agent finished or needs you while the Dock
+/// was hidden. Lives only for the length of the pulse; Core Animation runs it in the render server.
+struct PulseRing: NSViewRepresentable {
+    let color: Color
+    let size: CGFloat
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: size, height: size))
+        view.wantsLayer = true
+        for i in 0..<2 {
+            let ring = CALayer()
+            ring.frame = view.bounds
+            ring.cornerRadius = size * 0.225
+            ring.borderColor = NSColor(color).cgColor
+            ring.borderWidth = 2
+            ring.opacity = 0
+            let grow = CABasicAnimation(keyPath: "transform.scale")
+            grow.fromValue = 0.92
+            grow.toValue = 1.35
+            let fade = CAKeyframeAnimation(keyPath: "opacity")
+            fade.values = [0, 0.9, 0]
+            fade.keyTimes = [0, 0.2, 1]
+            let group = CAAnimationGroup()
+            group.animations = [grow, fade]
+            group.duration = 0.7
+            group.beginTime = CACurrentMediaTime() + Double(i) * 0.22
+            group.timingFunction = CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
+            ring.add(group, forKey: "pulse")
+            view.layer?.addSublayer(ring)
+        }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSView, context: Context) -> CGSize? {
+        CGSize(width: size, height: size)
+    }
+}
+
 /// Red unread badge that wiggles when the count goes up.
 struct UnreadBadge: View {
     let text: String

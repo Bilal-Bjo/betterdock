@@ -176,13 +176,15 @@ enum Theme: String, CaseIterable {
 
     /// Finds the wallpaper's dominant colour: a small k-means over a thumbnail, with each cluster
     /// weighted by how many pixels it holds and how colourful they are.
-    static func loadWallpaperTint(for screen: NSScreen) {
-        guard let url = NSWorkspace.shared.desktopImageURL(for: screen) else { return }
-        if url == wallpaperURL { return }
-        guard let image = NSImage(contentsOf: url), let (h, s, b) = dominantColor(of: image) else { return }
+    /// Returns whether the colour changed.
+    @discardableResult
+    static func loadWallpaperTint(for screen: NSScreen) -> Bool {
+        guard let url = NSWorkspace.shared.desktopImageURL(for: screen), url != wallpaperURL,
+              let image = NSImage(contentsOf: url), let (h, s, b) = dominantColor(of: image) else { return false }
         wallpaperURL = url
         wallpaperHSB = (h, s, b)
         wallpaperTint = Color(hue: h, saturation: s, brightness: b)
+        return true
     }
 
     private static var wallpaperURL: URL?
