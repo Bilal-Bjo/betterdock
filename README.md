@@ -11,7 +11,7 @@ Apps that live in a folder never take up a spot in the Dock, even while they run
 - **Agent status.** A dot in the corner of an icon shows when a Claude Code or Codex agent running in that app is working (amber), finished (green) or waiting for you (red).
 - **Unread badges** that wiggle when the count goes up.
 - **Drag and drop.** Reorder icons, drop an app onto a folder to add it, or drag it up and away to remove it.
-- **Right-click menus.** Open, hide, quit, new folder, rename folder, remove from folder, theme.
+- **Right-click menus.** Open, hide, quit, new folder, rename folder, remove from folder, plus a BetterDock menu for themes, icon styles, widgets and settings.
 - **Magnification, auto-hide and launch bounce,** with spring-based motion that respects Reduce Motion.
 - **Themes.** Glass, Wallpaper (tinted to your wallpaper) and Ember, switchable from any right-click menu.
 - **Icon styles.** Default, Dark, Clear and Tinted, rendered from each app's own icon.
@@ -43,7 +43,9 @@ Unread badges are read from Apple's Dock, so BetterDock asks for Accessibility a
 
 ## Configure
 
-The first run copies `examples/` into `config/`. Edit `config/dock.json` for the Dock and `config/folders/<name>.json` for each folder, then run `./install.sh` again. Reordering, folder edits and the theme are saved back to these files.
+Most settings live in the right-click menu. Right-click any icon and open **BetterDock** for Theme, Icon Style, Widgets, **Edit Settings…** and **Show Settings in Finder**. Folders are managed from their own menus: new folder, rename, remove from folder.
+
+Everything is stored as JSON in `config/` (the first run copies it from `examples/`): `config/dock.json` for the Dock and `config/folders/<name>.json` for each folder. Save `dock.json` in any editor and the Dock reloads with the change. Reordering, folder edits, theme and widget choices are written back to the same files.
 
 ```json
 {

@@ -143,13 +143,20 @@ final class DockModel: ObservableObject {
         }
     }
 
+    /// Bytes this process last wrote, so the config watcher can ignore our own saves.
+    var lastWritten: Data?
+
+    func writeConfig(_ json: [String: Any]) {
+        guard let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else { return }
+        lastWritten = out
+        try? out.write(to: URL(fileURLWithPath: configPath))
+    }
+
     func saveSetting(_ key: String, _ value: Any) {
         guard let data = FileManager.default.contents(atPath: configPath),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         json[key] = value
-        if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
-            try? out.write(to: URL(fileURLWithPath: configPath))
-        }
+        writeConfig(json)
     }
 
     /// Writes the pinned order back to dock.json, keeping every other setting.
@@ -164,9 +171,7 @@ final class DockModel: ObservableObject {
             case .separator: return nil
             }
         }
-        if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
-            try? out.write(to: URL(fileURLWithPath: configPath))
-        }
+        writeConfig(json)
     }
 
     var entries: [DockEntry] {
@@ -421,7 +426,55 @@ struct DockBar: View {
 struct DockMenuItem: Identifiable {
     let id = UUID()
     let title: String
-    let action: () -> Void
+    var checked: Bool? = nil
+    var children: [DockMenuItem] = []
+    var action: () -> Void = {}
+
+    static func submenu(_ title: String, _ children: [DockMenuItem]) -> DockMenuItem {
+        DockMenuItem(title: title, children: children)
+    }
+}
+
+/// One level of menu items: buttons, checkmark toggles, and submenus.
+struct DockMenuContent: View {
+    let items: [DockMenuItem]
+
+    var body: some View {
+        ForEach(items) { item in
+            if !item.children.isEmpty {
+                Menu(item.title) { DockMenuLeaves(items: item.children) }
+            } else {
+                DockMenuLeaves(items: [item])
+            }
+        }
+    }
+}
+
+struct DockMenuLeaves: View {
+    let items: [DockMenuItem]
+
+    var body: some View {
+        ForEach(items) { item in
+            if !item.children.isEmpty {
+                Menu(item.title) {
+                    ForEach(item.children) { child in leaf(child) }
+                }
+            } else {
+                leaf(item)
+            }
+        }
+    }
+
+    @ViewBuilder
+    func leaf(_ item: DockMenuItem) -> some View {
+        if item.title == "-" {
+            Divider()
+        } else if let checked = item.checked {
+            Toggle(item.title, isOn: Binding(get: { checked }, set: { _ in item.action() }))
+        } else {
+            Button(item.title, action: item.action)
+        }
+    }
 }
 
 enum DragPhase { case began, changed, ended }
@@ -509,7 +562,7 @@ struct DockTile: View {
                 AppMenu(app: app, running: running, open: tap)
                 if !menu.isEmpty { Divider() }
             }
-            ForEach(menu) { item in Button(item.title, action: item.action) }
+            DockMenuContent(items: menu)
         }
     }
 }
@@ -532,6 +585,7 @@ final class DockController: NSObject, NSApplicationDelegate {
     var peekCloseWork: DispatchWorkItem?
     var peekOpened: String?   // folder opened by hovering (closes when the cursor leaves)
     var revealWatch: Any?
+    var configWatch: DispatchSourceFileSystemObject?
 
     init(model: DockModel) { self.model = model }
 
@@ -560,6 +614,7 @@ final class DockController: NSObject, NSApplicationDelegate {
             for folder in self.model.folders { folder.state.agents = agents }
         }
         agentWatcher.start()
+        watchConfig()
         if model.config.badges ?? true {
             badgeReader.onChange = { [weak self] badges in
                 guard let self else { return }
@@ -602,6 +657,42 @@ final class DockController: NSObject, NSApplicationDelegate {
     }
 
     func folders() -> [FolderController] { model.folders }
+
+    /// Saving dock.json in an editor restarts the Dock with the new settings.
+    func watchConfig() {
+        configWatch?.cancel()
+        let fd = open(model.configPath, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename, .delete], queue: .main)
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            // Editors often save by replacing the file; re-arm on the new one.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                let data = FileManager.default.contents(atPath: self.model.configPath)
+                if data != nil, data != self.model.lastWritten,
+                   (try? JSONSerialization.jsonObject(with: data!)) != nil {
+                    self.relaunch()
+                } else {
+                    self.watchConfig()
+                }
+            }
+        }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        configWatch = source
+    }
+
+    func relaunch() {
+        // Under the login item, launchd restarts us; otherwise start a fresh copy first.
+        if ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] != "com.betterdock.app" {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            task.arguments = ["-n", Bundle.main.bundlePath]
+            task.terminationHandler = { _ in DispatchQueue.main.async { NSApp.terminate(nil) } }
+            if (try? task.run()) != nil { return }
+        }
+        NSApp.terminate(nil)
+    }
 
     func wire(_ folder: FolderController, id: String) {
         folder.onClose = { [weak self] in
@@ -826,26 +917,43 @@ final class DockController: NSObject, NSApplicationDelegate {
     }
 
     func menu(_ entry: DockEntry) -> [DockMenuItem] {
-        entryMenu(entry) + themeMenu() + iconMenu() + widgetMenu()
+        let own = entryMenu(entry)
+        return own + (own.isEmpty ? [] : [DockMenuItem(title: "-")]) + [settingsMenu()]
     }
 
-    func iconMenu() -> [DockMenuItem] {
-        IconStyle.allCases.map { style in
-            let mark = style == IconStyle.current ? "✓ " : "    "
-            return DockMenuItem(title: "\(mark)Icons: \(style.title)") { [weak self] in self?.setIconStyle(style) }
-        }
-    }
-
-    func widgetMenu() -> [DockMenuItem] {
+    /// Everything about the Dock itself lives under one submenu.
+    func settingsMenu() -> DockMenuItem {
         let present = Set(model.pinned.compactMap { if case .widget(let k) = $0 { return k } else { return nil } })
-        return [WidgetKind.nowPlaying, .clock, .battery, .agents].filter { !present.contains($0) }.map { kind in
-            DockMenuItem(title: "Add Widget: \(kind.title)") { [weak self] in
-                guard let self else { return }
-                self.model.pinned.append(.widget(kind))
-                self.model.saveOrder()
-                self.model.widgetData.active = self.model.revealed
-            }
+        let themes = [Theme.glass, .wallpaper, .ember].map { theme in
+            DockMenuItem(title: theme.rawValue.capitalized, checked: theme == Theme.current) { [weak self] in self?.setTheme(theme) }
         }
+        let icons = IconStyle.allCases.map { style in
+            DockMenuItem(title: style.title, checked: style == IconStyle.current) { [weak self] in self?.setIconStyle(style) }
+        }
+        let widgets = [WidgetKind.nowPlaying, .clock, .battery, .agents].map { kind in
+            DockMenuItem(title: kind.title, checked: present.contains(kind)) { [weak self] in self?.toggleWidget(kind) }
+        }
+        let configURL = URL(fileURLWithPath: model.configPath)
+        return .submenu("BetterDock", [
+            .submenu("Theme", themes),
+            .submenu("Icon Style", icons),
+            .submenu("Widgets", widgets),
+            DockMenuItem(title: "-"),
+            DockMenuItem(title: "Edit Settings…") { NSWorkspace.shared.open(configURL) },
+            DockMenuItem(title: "Show Settings in Finder") { NSWorkspace.shared.activateFileViewerSelecting([configURL]) },
+            DockMenuItem(title: "-"),
+            DockMenuItem(title: "Quit BetterDock") { NSApp.terminate(nil) },
+        ])
+    }
+
+    func toggleWidget(_ kind: WidgetKind) {
+        if model.pinned.contains(where: { $0.id == "widget:" + kind.rawValue }) {
+            model.pinned.removeAll { $0.id == "widget:" + kind.rawValue }
+        } else {
+            model.pinned.append(.widget(kind))
+        }
+        model.saveOrder()
+        model.widgetData.active = model.revealed && model.hasWidgets
     }
 
     func setIconStyle(_ style: IconStyle) {
@@ -853,13 +961,6 @@ final class DockController: NSObject, NSApplicationDelegate {
         model.objectWillChange.send()
         for folder in model.folders { folder.state.objectWillChange.send() }
         model.saveSetting("iconStyle", style.rawValue)
-    }
-
-    func themeMenu() -> [DockMenuItem] {
-        [Theme.glass, .wallpaper, .ember].map { theme in
-            let mark = theme == Theme.current ? "✓ " : "    "
-            return DockMenuItem(title: "\(mark)Theme: \(theme.rawValue.capitalized)") { [weak self] in self?.setTheme(theme) }
-        }
     }
 
     /// Switches theme live and remembers it in dock.json.
