@@ -30,11 +30,23 @@ Apple's Dock keeps running in the background, so Cmd-Tab, Mission Control and ap
 ```bash
 git clone https://github.com/Bilal-Bjo/betterdock.git
 cd betterdock
-./install.sh --try   # build and run once; nothing is installed
+./install.sh --try   # build and run once; nothing is installed, Apple's Dock stays
 ./install.sh         # install, start at login, hide Apple's Dock
 ```
 
-To remove it and bring Apple's Dock back:
+### What happens to Apple's Dock
+
+`./install.sh` hides Apple's Dock for good: it sets a very long auto-hide delay, so pushing the cursor to the edge never reveals it, and makes it as small as possible for the one place macOS still forces it on screen, Mission Control. Apple's Dock keeps running in the background, which is what keeps Cmd-Tab, Mission Control and app badges working. Your original Dock settings are saved to `config/apple-dock-backup.plist` first.
+
+If you want to do it by hand instead:
+
+```bash
+defaults write com.apple.dock autohide -bool true
+defaults write com.apple.dock autohide-delay -float 1000
+killall Dock
+```
+
+To remove BetterDock and bring Apple's Dock back exactly as it was:
 
 ```bash
 ./uninstall.sh

@@ -43,6 +43,11 @@ PLIST
 identity=$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development/ {print $2; exit}')
 codesign --force --sign "${identity:--}" "$app" >/dev/null
 
+if [[ "${1:-}" == "--try" ]] && launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+  echo "BetterDock is already installed. Run ./install.sh to update it, or ./uninstall.sh first to try a build."
+  exit 1
+fi
+
 pkill -x "$name" 2>/dev/null || true
 
 if [[ "${1:-}" == "--try" ]]; then
@@ -68,9 +73,17 @@ AGENT
 launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$agent"
 
-# Apple's Dock keeps running (Cmd-Tab, Mission Control) but never appears.
+# Apple's Dock keeps running (Cmd-Tab, Mission Control) but never appears: it hides with a very long
+# delay, and is made as small as possible for the few places macOS still shows it (Mission Control).
+# Your original settings are saved first so ./uninstall.sh can restore them exactly.
+mkdir -p config
+[[ -f config/apple-dock-backup.plist ]] || defaults export com.apple.dock config/apple-dock-backup.plist
 defaults write com.apple.dock autohide -bool true
 defaults write com.apple.dock autohide-delay -float 1000
+defaults write com.apple.dock tilesize -int 16
+defaults write com.apple.dock magnification -bool false
+defaults write com.apple.dock launchanim -bool false
+defaults write com.apple.dock show-recents -bool false
 killall Dock
 
 echo "BetterDock installed. Undo with ./uninstall.sh"

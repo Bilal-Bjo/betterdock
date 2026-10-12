@@ -841,6 +841,7 @@ final class DockController: NSObject, NSApplicationDelegate {
         case .widget(let kind):
             switch kind {
             case .nowPlaying: model.widgetData.control("playpause")
+            case .aiUsage: NSWorkspace.shared.open(URL(string: "https://claude.ai/settings/usage")!)
             case .timer: model.widgetData.toggleTimer()
             case .clock, .calendar: NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Calendar.app"))
             case .weather: NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Weather.app"))

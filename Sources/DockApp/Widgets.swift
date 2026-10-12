@@ -5,11 +5,12 @@ import IOKit.ps
 import SwiftUI
 
 enum WidgetKind: String, CaseIterable {
-    case nowPlaying, calendar, weather, clock, timer, system, network, storage, battery, agents
+    case nowPlaying, aiUsage, calendar, weather, clock, timer, system, network, storage, battery, agents
 
     var title: String {
         switch self {
         case .nowPlaying: return "Now Playing"
+        case .aiUsage: return "AI Usage"
         case .calendar: return "Calendar"
         case .weather: return "Weather"
         case .clock: return "Clock"
@@ -27,7 +28,9 @@ enum WidgetKind: String, CaseIterable {
         switch (self, size) {
         case (.battery, .small), (.weather, .small), (.timer, .small), (.system, .small), (.agents, .small), (.clock, .small),
              (.network, .small), (.storage, .small): return 1
-        case (.nowPlaying, .small), (.calendar, .small): return 1
+        case (.nowPlaying, .small), (.calendar, .small), (.aiUsage, .small): return 1
+        case (.aiUsage, .medium): return 2.5
+        case (.aiUsage, .large): return 3.5
         case (.nowPlaying, .medium): return 3
         case (.nowPlaying, .large): return 4
         case (.calendar, .large), (.system, .large), (.weather, .large), (.agents, .large): return 3
@@ -77,6 +80,14 @@ final class WidgetData: ObservableObject {
     @Published var weather: Weather?
     @Published var cpu: Double = 0
     @Published var memory: Double = 0
+    struct Quota: Equatable {
+        var percent: Double
+        var resets: Date?
+    }
+
+    @Published var claudeWeek: Quota?
+    @Published var codexWeek: Quota?
+    private var usageReadAt = Date.distantPast
     @Published var download: Double = 0   // bytes per second
     @Published var upload: Double = 0
     @Published var diskFree: Double = 0   // bytes
@@ -121,6 +132,16 @@ final class WidgetData: ObservableObject {
         if kinds.contains(.calendar) { readCalendar() }
         if kinds.contains(.network) { readNetwork() }
         if kinds.contains(.storage) { readStorage() }
+        if kinds.contains(.aiUsage), Date().timeIntervalSince(usageReadAt) > 20 {
+            usageReadAt = Date()
+            queue.async { [weak self] in
+                let claude = Self.readClaudeWeek(), codex = Self.readCodexWeek()
+                DispatchQueue.main.async {
+                    if self?.claudeWeek != claude { self?.claudeWeek = claude }
+                    if self?.codexWeek != codex { self?.codexWeek = codex }
+                }
+            }
+        }
         guard kinds.contains(.nowPlaying) else { return }
         queue.async { [weak self] in
             let track = Self.readTrack()
@@ -225,6 +246,63 @@ final class WidgetData: ObservableObject {
             let used = Double(stats.active_count + stats.wire_count + stats.compressor_page_count) * page
             memory = used / Double(ProcessInfo.processInfo.physicalMemory)
         }
+    }
+
+    // MARK: AI usage (weekly)
+
+    /// Saved by hooks/claude-statusline.sh from the rate_limits Claude Code gives its status line.
+    static func readClaudeWeek() -> Quota? {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/BetterDock/usage/claude.json")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let percent = (json["weekly"] as? NSNumber)?.doubleValue else { return nil }
+        var resets: Date?
+        if let raw = json["resets"] as? String {
+            if let seconds = Double(raw) { resets = Date(timeIntervalSince1970: seconds) }
+            else { resets = ISO8601DateFormatter().date(from: raw) }
+        }
+        if let resets, resets < Date() { return Quota(percent: 0, resets: nil) } // the week rolled over since
+        return Quota(percent: percent, resets: resets)
+    }
+
+    /// Codex writes its rate limits into each session log; the weekly window is 10,080 minutes.
+    static func readCodexWeek() -> Quota? {
+        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/sessions")
+        guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
+        var newest: (URL, Date)?
+        for case let url as URL in walker where url.pathExtension == "jsonl" {
+            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            if newest == nil || date > newest!.1 { newest = (url, date) }
+        }
+        guard let file = newest?.0, let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        try? handle.seek(toOffset: size > 262_144 ? size - 262_144 : 0)
+        guard let tail = try? handle.readToEnd(), let text = String(data: tail, encoding: .utf8) else { return nil }
+
+        func weekly(in object: Any) -> Quota? {
+            if let dict = object as? [String: Any] {
+                if let limits = dict["rate_limits"] as? [String: Any] {
+                    for key in ["primary", "secondary"] {
+                        if let window = limits[key] as? [String: Any],
+                           (window["window_minutes"] as? NSNumber)?.intValue == 10080,
+                           let used = (window["used_percent"] as? NSNumber)?.doubleValue {
+                            let resets = (window["resets_at"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
+                            if let resets, resets < Date() { return Quota(percent: 0, resets: nil) }
+                            return Quota(percent: used, resets: resets)
+                        }
+                    }
+                }
+                for value in dict.values { if let found = weekly(in: value) { return found } }
+            }
+            return nil
+        }
+        for line in text.split(separator: "\n").reversed() where line.contains("rate_limits") {
+            if let data = line.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data),
+               let found = weekly(in: object) { return found }
+        }
+        return nil
     }
 
     // MARK: Network and storage
@@ -417,6 +495,7 @@ struct WidgetTile: View {
         case .system: system
         case .timer: focusTimer
         case .network: network
+        case .aiUsage: aiUsage
         case .storage: storage
         }
     }
@@ -621,6 +700,56 @@ struct WidgetTile: View {
         }
     }
 
+    var aiUsage: some View {
+        let rows: [(String, String, WidgetData.Quota?, Color)] = [
+            ("Claude", "/Applications/Claude.app", data.claudeWeek, Color(red: 0.85, green: 0.47, blue: 0.34)),
+            ("Codex", "/Applications/ChatGPT.app", data.codexWeek, Color(red: 0.62, green: 0.66, blue: 0.75)),
+        ]
+        return Group {
+            if compact {
+                // Two concentric rings: Claude outside, Codex inside.
+                ZStack {
+                    ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
+                        let inset = CGFloat(i) * height * 0.13
+                        Circle().stroke(.white.opacity(0.12), lineWidth: height * 0.06).padding(inset)
+                        Circle().trim(from: 0, to: (row.2?.percent ?? 0) / 100)
+                            .stroke(row.3, style: StrokeStyle(lineWidth: height * 0.06, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                            .padding(inset)
+                    }
+                }
+                .padding(height * 0.06)
+            } else {
+                VStack(alignment: .leading, spacing: height * 0.07) {
+                    ForEach(rows, id: \.0) { name, path, quota, color in
+                        HStack(spacing: height * 0.08) {
+                            Image(nsImage: NSWorkspace.shared.icon(forFile: path)).resizable().frame(width: height * 0.24, height: height * 0.24)
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack {
+                                    Text(name).font(font(0.14, .medium)).foregroundStyle(.secondary)
+                                    Spacer(minLength: 4)
+                                    Text(quota.map { "\(Int($0.percent.rounded()))%" } ?? "–").font(font(0.14, .semibold)).monospacedDigit()
+                                    if rich, let resets = quota?.resets {
+                                        Text(resets, format: .relative(presentation: .named))
+                                            .font(font(0.12)).foregroundStyle(.secondary).lineLimit(1)
+                                    }
+                                }
+                                GeometryReader { geo in
+                                    Capsule().fill(.white.opacity(0.12)).overlay(alignment: .leading) {
+                                        Capsule().fill(color).frame(width: geo.size.width * min(max((quota?.percent ?? 0) / 100, 0), 1))
+                                    }
+                                }
+                                .frame(height: max(3, height * 0.05))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .animation(Motion.open, value: data.claudeWeek)
+        .animation(Motion.open, value: data.codexWeek)
+    }
+
     var network: some View {
         Group {
             if compact {
@@ -727,5 +856,7 @@ enum WidgetSelfTest {
         print("weather:", data.weather.map { "\($0.city) \(Int($0.temperature))° code \($0.code) H\(Int($0.high)) L\(Int($0.low))" } ?? "unavailable")
         data.toggleTimer()
         print("timer: running =", data.timerEnd != nil, "length", Int(data.timerLength / 60), "min")
+        print("claude weekly:", WidgetData.readClaudeWeek().map { "\(Int($0.percent))% resets \($0.resets.map { "\($0)" } ?? "?")" } ?? "no data yet (needs a Claude Code session with the BetterDock status line)")
+        print("codex weekly:", WidgetData.readCodexWeek().map { "\(Int($0.percent))% resets \($0.resets.map { "\($0)" } ?? "?")" } ?? "no data")
     }
 }
