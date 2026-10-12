@@ -146,7 +146,7 @@ struct AppCell: View {
                 Button("Remove from Folder") { remove(app) }
             }
         }
-        .help(app.name)
+        .tooltip(app.name)
     }
 }
 
@@ -206,9 +206,20 @@ struct FolderView: View {
     }
 }
 
-struct GlassBackground: ViewModifier {
-    static var useMaterial = false // snapshots can't render Liquid Glass
+/// Set while rendering --snapshot images: ImageRenderer can't draw glass, AppKit-backed views or tooltips.
+enum Snapshot {
+    static var active = false
+}
 
+extension View {
+    /// A tooltip, skipped in snapshots where it renders as a placeholder.
+    @ViewBuilder
+    func tooltip(_ text: String) -> some View {
+        if Snapshot.active { self } else { help(text) }
+    }
+}
+
+struct GlassBackground: ViewModifier {
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: 28, style: .continuous)
         content
@@ -308,6 +319,7 @@ final class FolderController {
         x = min(max(x, screen.frame.minX + 8), screen.frame.maxX - size.width - 8)
         panel.setFrameOrigin(NSPoint(x: x, y: anchor.y - 24)) // 24pt shadow inset in FolderView
 
+        panel.appearance = Theme.current.appearance
         state.running = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.path })
         state.anchorX = min(max((anchor.x - x) / size.width, 0), 1)
         state.open = false

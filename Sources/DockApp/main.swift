@@ -17,7 +17,7 @@ struct DockConfig: Decodable {
     let autohide: Bool
     let items: [Item]
     let hidden: [String]? // apps that never get a tile, even while running
-    let theme: String?    // glass | ember | wallpaper
+    let theme: String?    // glass | graphite | paper | midnight | wallpaper
     let badges: Bool?     // read unread badges from Apple's Dock (needs Accessibility)
     let iconStyle: String? // default | dark | clear | tinted
     let iconTint: String?  // wallpaper | yellow | blue | pink | green | purple | graphite
@@ -348,14 +348,8 @@ struct DockView: View {
                 let x = (dragged ? model.dragX : slot.centerX) - model.originX
                 switch slot.entry {
                 case .separator:
-                    Group {
-                        if Theme.current == .ember {
-                            Circle().fill(Theme.emberRed.opacity(0.8)).frame(width: 5, height: 5)
-                        } else {
-                            Capsule().fill(.primary.opacity(0.25)).frame(width: 1, height: model.config.iconSize * 0.7)
-                        }
-                    }
-                    .position(x: x, y: iconBottom - model.config.iconSize / 2)
+                    Theme.current.separator(height: model.config.iconSize * 0.7)
+                        .position(x: x, y: iconBottom - model.config.iconSize / 2)
                 default:
                     let size = dragged && model.dragOut ? model.config.iconSize : slot.size
                     let width = dragged && model.dragOut ? model.width(of: slot.entry) : slot.width
@@ -375,6 +369,7 @@ struct DockView: View {
                         .overlay(alignment: .top) {
                             if dragged && model.dragOut {
                                 Text("Remove").font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(Theme.current.labelText)
                                     .padding(.horizontal, 8).padding(.vertical, 3)
                                     .background(LabelBackground())
                                     .fixedSize()
@@ -396,6 +391,7 @@ struct DockView: View {
             if let hovered, model.dragID == nil {
                 Text(title(of: hovered.entry))
                     .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.current.labelText)
                     .padding(.horizontal, 10).padding(.vertical, 4)
                     .background(LabelBackground())
                     .fixedSize()
@@ -404,7 +400,7 @@ struct DockView: View {
         }
         .frame(width: model.windowWidth, height: h, alignment: .topLeading)
         .environment(\.onScreen, model.revealed)
-        .onDrop(of: [UTType.fileURL], delegate: DockDrop(model: model, handler: dropHandler))
+        .modifier(FileDrop(model: model, handler: dropHandler))
         .offset(y: model.revealed || Motion.reduce ? 0 : model.barHeight + model.bottomMargin + 12)
         .opacity(model.revealed || !Motion.reduce ? 1 : 0)
         .animation(model.revealed ? .spring(duration: 0.3, bounce: 0) : .spring(duration: 0.2, bounce: 0), value: model.revealed)
@@ -441,20 +437,31 @@ struct DockView: View {
     }
 }
 
-/// Pill behind tooltips; snapshots get a solid fill because the renderer can't draw materials.
+/// Pill behind tooltips, in the theme's colours.
 struct LabelBackground: View {
     var body: some View {
-        if GlassBackground.useMaterial {
-            Capsule().fill(Color(white: 0.16).opacity(0.85))
-        } else {
-            Capsule().fill(.regularMaterial)
-        }
+        Capsule().fill(Theme.current.labelFill)
+            .overlay(Capsule().strokeBorder(Theme.current.widgetStroke, lineWidth: 0.5))
     }
 }
 
 struct DockBar: View {
     var body: some View {
         Theme.current.surface(RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+}
+
+/// Snapshots skip the drop target: the image renderer draws it as an unsupported-view placeholder.
+struct FileDrop: ViewModifier {
+    let model: DockModel
+    let handler: (DockEntry) -> (([URL]) -> Void)?
+
+    func body(content: Content) -> some View {
+        if Snapshot.active {
+            content
+        } else {
+            content.onDrop(of: [UTType.fileURL], delegate: DockDrop(model: model, handler: handler))
+        }
     }
 }
 
@@ -709,6 +716,7 @@ final class DockController: NSObject, NSApplicationDelegate {
         panel.hasShadow = false
         panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)))
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        panel.appearance = Theme.current.appearance
         panel.contentView = NSHostingView(rootView: DockView(model: model, activate: activate, reorder: reorder,
                                                              dropHandler: { [weak self] in self?.dropHandler($0) }))
         layoutWindow()
@@ -1084,8 +1092,8 @@ final class DockController: NSObject, NSApplicationDelegate {
     /// Everything about the Dock itself lives under one submenu.
     func settingsMenu() -> DockMenuItem {
         let present = Set(model.pinned.compactMap { if case .widget(let k) = $0 { return k } else { return nil } })
-        let themes = [Theme.glass, .wallpaper, .ember].map { theme in
-            DockMenuItem(title: theme.rawValue.capitalized, checked: theme == Theme.current) { [weak self] in self?.setTheme(theme) }
+        let themes = Theme.allCases.map { theme in
+            DockMenuItem(title: theme.title, checked: theme == Theme.current) { [weak self] in self?.setTheme(theme) }
         }
         let icons = IconStyle.allCases.map { style in
             DockMenuItem(title: style.title, checked: style == IconStyle.current) { [weak self] in self?.setIconStyle(style) }
@@ -1232,6 +1240,7 @@ final class DockController: NSObject, NSApplicationDelegate {
     func setTheme(_ theme: Theme) {
         if theme == .wallpaper { Theme.loadWallpaperTint(for: model.screen) }
         Theme.current = theme
+        panel.appearance = theme.appearance
         model.objectWillChange.send()
         for folder in model.folders { folder.state.objectWillChange.send() }
         model.saveSetting("theme", theme.rawValue)
@@ -1314,7 +1323,7 @@ final class DockController: NSObject, NSApplicationDelegate {
 let resources = (Bundle.main.object(forInfoDictionaryKey: "BDConfigDir") as? String) ?? Bundle.main.resourcePath!
 let configData = try! Data(contentsOf: URL(fileURLWithPath: "\(resources)/dock.json"))
 let dockConfig = try! JSONDecoder().decode(DockConfig.self, from: configData)
-Theme.current = Theme(rawValue: dockConfig.theme ?? "glass") ?? .glass
+Theme.current = Theme(named: dockConfig.theme)
 IconStyle.current = IconStyle(rawValue: dockConfig.iconStyle ?? "default") ?? .standard
 IconTint.current = IconTint(rawValue: dockConfig.iconTint ?? "wallpaper") ?? .wallpaper
 
@@ -1377,21 +1386,25 @@ if CommandLine.arguments.contains("--widget-test") {
 
 if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "--snapshot" {
     // Renders the dock over the bottom of your wallpaper with demo agent dots and badges.
-    // Usage: --snapshot out.png [glass|ember|wallpaper]
+    // Usage: --snapshot out.png [glass|graphite|paper|midnight|wallpaper]
     _ = NSApplication.shared
-    if CommandLine.arguments.count >= 4 { Theme.current = Theme(rawValue: CommandLine.arguments[3]) ?? .glass }
+    if CommandLine.arguments.count >= 4 { Theme.current = Theme(named: CommandLine.arguments[3]) }
     let screen = NSScreen.main!
     Theme.loadWallpaperTint(for: screen)
-    GlassBackground.useMaterial = true
+    Snapshot.active = true
     let model = DockModel(config: dockConfig, folderDir: "\(resources)/folders")
     model.agents = ["/Applications/Claude.app": .working, "/Applications/Google Chrome.app": .done]
     model.badges = ["/Applications/WhatsApp.app": "3", "/Applications/Telegram.app": "12"]
     model.extras = []
-    let slots = model.slots()
-    model.mouseX = slots.first { if case .folder = $0.entry { return true } else { return false } }?.centerX
+    let folderSlot = model.slots().first { if case .folder = $0.entry { return true } else { return false } }
+    model.mouseX = folderSlot?.centerX
     let wallpaper = NSWorkspace.shared.desktopImageURL(for: screen).flatMap { NSImage(contentsOf: $0) }
     MainActor.assumeIsolated {
-        let height = model.windowHeight + 60
+        // The first folder is drawn open above its tile, so the panel surface is part of the picture.
+        let folder: FolderController? = { if case .folder(_, let f)? = folderSlot?.entry { return f } else { return nil } }()
+        folder?.state.open = true
+        let panelHeight: CGFloat = folder == nil ? 0 : 300
+        let height = model.windowHeight + 60 + panelHeight
         let view = ZStack(alignment: .bottom) {
             if let wallpaper {
                 Image(nsImage: wallpaper).resizable().aspectRatio(contentMode: .fill)
@@ -1399,12 +1412,23 @@ if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "--snapshot" {
                     .frame(width: screen.frame.width, height: height, alignment: .bottom).clipped()
             }
             DockView(model: model, activate: { _, _ in }, reorder: { _, _, _ in })
+            if let folder, let folderSlot {
+                FolderView(state: folder.state, launch: { _ in }, remove: nil)
+                    .fixedSize()
+                    .frame(width: screen.frame.width, height: height, alignment: .bottom)
+                    .offset(x: folderSlot.centerX - screen.frame.midX, y: -(model.windowHeight - model.bottomMargin - 30))
+            }
         }
         .frame(width: model.screen.frame.width, height: height)
-        .environment(\.colorScheme, .dark)
+        .environment(\.colorScheme, Theme.current.scheme)
         let renderer = ImageRenderer(content: view)
         renderer.scale = 2
-        let rep = NSBitmapImageRep(cgImage: renderer.cgImage!)
+        // The renderer can hand back an HDR (PQ) image; flatten it to sRGB so any viewer shows true colours.
+        let image = renderer.cgImage!
+        let context = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        let rep = NSBitmapImageRep(cgImage: context.makeImage()!)
         try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: CommandLine.arguments[2]))
     }
     exit(0)
