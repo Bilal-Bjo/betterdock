@@ -48,6 +48,26 @@ enum WidgetSize: String, CaseIterable {
 
 // MARK: - Data
 
+/// AppleScripts compiled once and reused; compiling is the expensive part.
+enum Scripts {
+    private static var cache: [String: NSAppleScript] = [:]
+    private static let lock = NSLock()
+
+    static func run(_ source: String) -> NSAppleEventDescriptor? {
+        lock.lock()
+        let script: NSAppleScript? = cache[source] ?? {
+            let compiled = NSAppleScript(source: source)
+            var error: NSDictionary?
+            compiled?.compileAndReturnError(&error)
+            cache[source] = compiled
+            return compiled
+        }()
+        lock.unlock()
+        var error: NSDictionary?
+        return script?.executeAndReturnError(&error)
+    }
+}
+
 final class WidgetData: ObservableObject {
     struct Track: Equatable {
         var title: String
@@ -93,6 +113,7 @@ final class WidgetData: ObservableObject {
     @Published var diskFree: Double = 0   // bytes
     @Published var diskTotal: Double = 1
     private var lastBytes: (rx: UInt64, tx: UInt64, at: Date)?
+    private var storageReadAt = Date.distantPast
     @Published var timerEnd: Date?
     @Published var timerPaused: TimeInterval?
     var timerLength: TimeInterval = 25 * 60
@@ -127,14 +148,19 @@ final class WidgetData: ObservableObject {
 
     /// Fast sources: music, battery, CPU and memory.
     func refresh() {
-        if kinds.contains(.battery) { battery = Self.readBattery() }
+        if kinds.contains(.battery), let now = Self.readBattery(), now.0 != battery?.level || now.1 != battery?.charging {
+            battery = now
+        }
         if kinds.contains(.system) { readSystem() }
         if kinds.contains(.calendar), Date().timeIntervalSince(calendarReadAt) > 60 {
             calendarReadAt = Date()
             readCalendar()
         }
         if kinds.contains(.network) { readNetwork() }
-        if kinds.contains(.storage) { readStorage() }
+        if kinds.contains(.storage), Date().timeIntervalSince(storageReadAt) > 60 {
+            storageReadAt = Date()
+            readStorage()
+        }
         if kinds.contains(.aiUsage), Date().timeIntervalSince(usageReadAt) > 20 {
             usageReadAt = Date()
             queue.async { [weak self] in
@@ -188,8 +214,7 @@ final class WidgetData: ObservableObject {
                 return (name of current track) & "\\n" & (artist of current track) & "\\n" & (player state as string) & "\\n" & (p / d) & "\\n" & \(art)
             end tell
             """
-            var error: NSDictionary?
-            guard let out = NSAppleScript(source: script)?.executeAndReturnError(&error).stringValue, !out.isEmpty else { continue }
+            guard let out = Scripts.run(script)?.stringValue, !out.isEmpty else { continue }
             let parts = out.components(separatedBy: "\n")
             guard parts.count >= 4 else { continue }
             return Track(title: parts[0], artist: parts[1], playing: parts[2] == "playing",
@@ -202,8 +227,7 @@ final class WidgetData: ObservableObject {
     func control(_ command: String) {
         let player = track?.player ?? "Spotify"
         queue.async { [weak self] in
-            var error: NSDictionary?
-            NSAppleScript(source: "tell application \"\(player)\" to \(command)")?.executeAndReturnError(&error)
+            _ = Scripts.run("tell application \"\(player)\" to \(command)")
             DispatchQueue.main.async { self?.refresh() }
         }
     }
@@ -235,7 +259,10 @@ final class WidgetData: ObservableObject {
                 let idle = Double(load.cpu_ticks.2 &- last.cpu_ticks.2)
                 let nice = Double(load.cpu_ticks.3 &- last.cpu_ticks.3)
                 let total = user + sys + idle + nice
-                if total > 0 { cpu = (user + sys + nice) / total }
+                if total > 0 {
+                    let value = (user + sys + nice) / total
+                    if Int(value * 100) != Int(cpu * 100) { cpu = value }
+                }
             }
             lastCPU = load
         }
@@ -247,7 +274,8 @@ final class WidgetData: ObservableObject {
         if vmOK == KERN_SUCCESS {
             let page = Double(vm_kernel_page_size)
             let used = Double(stats.active_count + stats.wire_count + stats.compressor_page_count) * page
-            memory = used / Double(ProcessInfo.processInfo.physicalMemory)
+            let value = used / Double(ProcessInfo.processInfo.physicalMemory)
+            if Int(value * 100) != Int(memory * 100) { memory = value }
         }
     }
 
@@ -271,12 +299,20 @@ final class WidgetData: ObservableObject {
 
     /// Codex writes its rate limits into each session log; the weekly window is 10,080 minutes.
     static func readCodexWeek() -> Quota? {
+        // Sessions live in sessions/YYYY/MM/DD; only the last few days can hold the latest one.
         let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/sessions")
-        guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
+        let calendar = Calendar(identifier: .gregorian)
         var newest: (URL, Date)?
-        for case let url as URL in walker where url.pathExtension == "jsonl" {
-            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            if newest == nil || date > newest!.1 { newest = (url, date) }
+        for back in 0..<4 {
+            guard let day = calendar.date(byAdding: .day, value: -back, to: Date()) else { continue }
+            let c = calendar.dateComponents([.year, .month, .day], from: day)
+            let dir = root.appendingPathComponent(String(format: "%04d/%02d/%02d", c.year!, c.month!, c.day!))
+            let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+            for url in files where url.pathExtension == "jsonl" {
+                let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                if newest == nil || date > newest!.1 { newest = (url, date) }
+            }
+            if newest != nil { break }
         }
         guard let file = newest?.0, let handle = try? FileHandle(forReadingFrom: file) else { return nil }
         defer { try? handle.close() }
@@ -328,17 +364,22 @@ final class WidgetData: ObservableObject {
         let now = Date()
         if let last = lastBytes {
             let dt = max(now.timeIntervalSince(last.at), 0.5)
-            download = Double(rx &- last.rx) / dt
-            upload = Double(tx &- last.tx) / dt
+            let down = Double(rx &- last.rx) / dt, up = Double(tx &- last.tx) / dt
+            if Self.rate(down) != Self.rate(download) { download = down }
+            if Self.rate(up) != Self.rate(upload) { upload = up }
         }
         lastBytes = (rx, tx, now)
     }
 
     private func readStorage() {
         let url = URL(fileURLWithPath: "/")
-        if let v = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey]) {
-            diskFree = Double(v.volumeAvailableCapacityForImportantUsage ?? 0)
-            diskTotal = Double(v.volumeTotalCapacity ?? 1)
+        queue.async { [weak self] in
+            guard let v = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey]) else { return }
+            let free = Double(v.volumeAvailableCapacityForImportantUsage ?? 0), total = Double(v.volumeTotalCapacity ?? 1)
+            DispatchQueue.main.async {
+                self?.diskFree = free
+                self?.diskTotal = total
+            }
         }
     }
 
@@ -727,7 +768,7 @@ struct WidgetTile: View {
                 VStack(alignment: .leading, spacing: height * 0.07) {
                     ForEach(rows, id: \.0) { name, path, quota, color in
                         HStack(spacing: height * 0.08) {
-                            Image(nsImage: NSWorkspace.shared.icon(forFile: path)).resizable().frame(width: height * 0.24, height: height * 0.24)
+                            Image(nsImage: WidgetIcons.icon(path)).resizable().frame(width: height * 0.24, height: height * 0.24)
                             VStack(alignment: .leading, spacing: 2) {
                                 HStack {
                                     Text(name).font(font(0.14, .medium)).foregroundStyle(.secondary)
@@ -830,6 +871,17 @@ struct WidgetTile: View {
                 }
             }
         }
+    }
+}
+
+/// App icons used inside widgets, looked up once.
+enum WidgetIcons {
+    private static var cache: [String: NSImage] = [:]
+    static func icon(_ path: String) -> NSImage {
+        if let hit = cache[path] { return hit }
+        let icon = NSWorkspace.shared.icon(forFile: path)
+        cache[path] = icon
+        return icon
     }
 }
 

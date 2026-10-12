@@ -95,24 +95,78 @@ enum AgentState: Int, Comparable {
     }
 }
 
+/// Whether the surface this view lives on is on screen. Looping animations only run while it is,
+/// so a hidden Dock costs no CPU.
+private struct OnScreenKey: EnvironmentKey { static let defaultValue = true }
+extension EnvironmentValues {
+    var onScreen: Bool {
+        get { self[OnScreenKey.self] }
+        set { self[OnScreenKey.self] = newValue }
+    }
+}
+
 /// Top-right status dot: amber breathes while an agent works, green when it is done, red when it needs you.
 struct AgentDot: View {
     let state: AgentState
     let size: CGFloat
-    @State private var breathe = false
+    @Environment(\.onScreen) private var onScreen
 
     var body: some View {
+        Group {
+            if state == .working && onScreen && !Motion.reduce {
+                BreathingDot(color: state.color, size: size)
+            } else {
+                dot(state.color)
+            }
+        }
+        .transition(.scale(scale: 0.6).combined(with: .opacity))
+        .help(state.label)
+    }
+
+    func dot(_ color: Color) -> some View {
         Circle()
-            .fill(state.color)
+            .fill(color)
             .overlay(Circle().strokeBorder(.black.opacity(0.35), lineWidth: 1))
             .frame(width: size, height: size)
-            .shadow(color: state.color.opacity(0.7), radius: state == .working ? 3 : 2)
-            .opacity(state == .working && breathe ? 0.45 : 1)
-            .animation(state == .working && !Motion.reduce ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true) : .default,
-                       value: breathe)
-            .onAppear { breathe = true }
-            .transition(.scale(scale: 0.6).combined(with: .opacity))
-            .help(state.label)
+            .shadow(color: color.opacity(0.7), radius: 2)
+    }
+}
+
+/// The breathing glow runs as a Core Animation loop in the render server, so the app does no
+/// per-frame work while an agent is working.
+private struct BreathingDot: NSViewRepresentable {
+    let color: Color
+    let size: CGFloat
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: size, height: size))
+        view.wantsLayer = true
+        let dot = CALayer()
+        dot.frame = view.bounds
+        dot.cornerRadius = size / 2
+        dot.backgroundColor = NSColor(color).cgColor
+        dot.borderColor = NSColor.black.withAlphaComponent(0.35).cgColor
+        dot.borderWidth = 1
+        dot.shadowColor = NSColor(color).cgColor
+        dot.shadowOpacity = 0.7
+        dot.shadowRadius = 3
+        dot.shadowOffset = .zero
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 1
+        pulse.toValue = 0.45
+        pulse.duration = 0.9
+        pulse.autoreverses = true
+        pulse.repeatCount = .infinity
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        dot.add(pulse, forKey: "breathe")
+        view.layer?.addSublayer(dot)
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSView, context: Context) -> CGSize? {
+        CGSize(width: size, height: size)
     }
 }
 

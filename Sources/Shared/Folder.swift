@@ -59,7 +59,11 @@ final class FolderState: ObservableObject {
     @Published var running: Set<String> = []
     @Published var agents: [String: AgentState] = [:]
     @Published var badges: [String: String] = [:]
+    @Published var dragging: String?
+    @Published var dragOffset: CGSize = .zero
     var anchorX: CGFloat = 0.5
+    /// Called when an app is dragged out of the panel and released: (app path, screen point).
+    var onDragOut: (String, NSPoint) -> Void = { _, _ in }
 }
 
 struct AppCell: View {
@@ -109,8 +113,32 @@ struct AppCell: View {
                 : Motion.close,
             value: state.open
         )
+        .offset(state.dragging == app.id ? state.dragOffset : .zero)
+        .zIndex(state.dragging == app.id ? 1 : 0)
         .onHover { hovering = $0 }
-        .onLongPressGesture(minimumDuration: 0, pressing: { pressed = $0 }, perform: { launch(app) })
+        .gesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                .onChanged { value in
+                    if hypot(value.translation.width, value.translation.height) > 5 {
+                        pressed = false
+                        state.dragging = app.id
+                        state.dragOffset = value.translation
+                    } else if state.dragging == nil {
+                        pressed = true
+                    }
+                }
+                .onEnded { value in
+                    pressed = false
+                    let wasDragging = state.dragging == app.id
+                    state.dragging = nil
+                    withAnimation(.spring(duration: 0.3, bounce: 0.15)) { state.dragOffset = .zero }
+                    if wasDragging {
+                        state.onDragOut(app.id, NSEvent.mouseLocation)
+                    } else if hypot(value.translation.width, value.translation.height) <= 5 {
+                        launch(app)
+                    }
+                }
+        )
         .contextMenu {
             AppMenu(app: app, running: state.running.contains(app.id), open: { launch(app) })
             if let remove {
@@ -213,6 +241,9 @@ final class FolderController {
     var apps: [FolderApp] { state.apps }
     var isOpen: Bool { panel.isVisible && !closing }
 
+    /// Set by the dock: an app dragged out of the folder lands at this screen point.
+    var onDragOutApp: ((String, NSPoint) -> Void)?
+
     init(config: FolderConfig, path: String? = nil) {
         self.config = config
         self.path = path
@@ -225,8 +256,16 @@ final class FolderController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         let view = FolderView(state: state, launch: { [weak self] app in self?.launch(app) },
                               remove: { [weak self] app in self?.removeFromFolder(app.id) })
+            .environment(\.onScreen, true)
         panel.contentView = NSHostingView(rootView: view)
         reload()
+        state.onDragOut = { [weak self] path, point in
+            guard let self, !self.panel.frame.insetBy(dx: 20, dy: 20).contains(point) else { return }
+            self.config.apps.removeAll { $0 == path }
+            self.commit()
+            self.hide()
+            self.onDragOutApp?(path, point)
+        }
     }
 
     private func reload() {

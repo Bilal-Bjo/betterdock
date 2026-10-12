@@ -2,7 +2,7 @@
 
 A lightweight replacement for the macOS Dock, with iPhone-style app folders.
 
-Apps that live in a folder never take up a spot in the Dock, even while they run. Native Swift and SwiftUI, no dependencies, around 20 MB of memory and no CPU use at rest.
+Apps that live in a folder never take up a spot in the Dock, even while they run. Native Swift and SwiftUI, no dependencies, and no measurable CPU at rest: 0.0% hidden, about 0.1% on screen with widgets and a glowing agent dot.
 
 ## Features
 
@@ -10,7 +10,7 @@ Apps that live in a folder never take up a spot in the Dock, even while they run
 - **A clean Dock.** Apps in folders, and apps you hide, never get their own icon.
 - **Agent status.** A dot in the corner of an icon shows when a Claude Code or Codex agent running in that app is working (amber), finished (green) or waiting for you (red).
 - **Unread badges** that wiggle when the count goes up.
-- **Drag and drop.** Reorder icons, drop an app onto a folder to add it, or drag it up and away to remove it. Drop files on an app to open them with it.
+- **Drag and drop.** Reorder icons, drop an app onto a folder to add it, drag it back out of an open folder, drag a running app from the right side to keep it, or drag it up and away to remove it. Drop files on an app to open them with it.
 - **Trash.** Full or empty at a glance, click to open, drop files to delete, right-click to empty.
 - **Right-click menus.** Open, hide, quit, new folder, rename folder, remove from folder, plus a BetterDock menu for themes, icon styles, widgets and settings.
 - **Magnification, auto-hide and launch bounce,** with spring-based motion that respects Reduce Motion.

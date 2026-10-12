@@ -80,11 +80,17 @@ final class BadgeReader {
     var onChange: ([String: String]) -> Void = { _ in }
     private var timer: Timer?
     private var last: [String: String] = [:]
+    private var polledAt = Date.distantPast
+    /// Poll often while the Dock is on screen, rarely while it is hidden.
+    var visible = false
 
     func start() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options) // shows the permission prompt once
-        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.poll() }
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if self.visible || Date().timeIntervalSince(self.polledAt) > 15 { self.poll() }
+        }
         timer?.tolerance = 0.5
     }
 
@@ -94,7 +100,8 @@ final class BadgeReader {
         return value
     }
 
-    private func poll() {
+    func poll() {
+        polledAt = Date()
         guard AXIsProcessTrusted(),
               let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return }
         let root = AXUIElementCreateApplication(dock.processIdentifier)
