@@ -713,6 +713,7 @@ final class DockController: NSObject, NSApplicationDelegate {
                                                              dropHandler: { [weak self] in self?.dropHandler($0) }))
         layoutWindow()
         panel.orderFrontRegardless()
+        Updater.start()
 
         for case .folder(let id, let folder) in model.pinned { wire(folder, id: id) }
 
@@ -1118,6 +1119,7 @@ final class DockController: NSObject, NSApplicationDelegate {
             DockMenuItem(title: "-"),
             DockMenuItem(title: "Edit Settings…") { NSWorkspace.shared.open(configURL) },
             DockMenuItem(title: "Show Settings in Finder") { NSWorkspace.shared.activateFileViewerSelecting([configURL]) },
+            DockMenuItem(title: "Check for Updates…") { Updater.checkForUpdates() },
             DockMenuItem(title: "-"),
             DockMenuItem(title: "Quit BetterDock") { NSApp.terminate(nil) },
         ])
