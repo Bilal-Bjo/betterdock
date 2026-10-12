@@ -9,6 +9,7 @@ struct DockConfig: Decodable {
         let app: String?
         let folder: String?
         let widget: String?
+        let size: String?
     }
     let iconSize: CGFloat
     let magnifiedSize: CGFloat
@@ -18,6 +19,7 @@ struct DockConfig: Decodable {
     let theme: String?    // glass | ember | wallpaper
     let badges: Bool?     // read unread badges from Apple's Dock (needs Accessibility)
     let iconStyle: String? // default | dark | clear | tinted
+    let iconTint: String?  // wallpaper | yellow | blue | pink | green | purple | graphite
 }
 
 enum DockEntry: Identifiable {
@@ -58,6 +60,7 @@ final class DockModel: ObservableObject {
     var configPath = ""
     let folderDir: String
     let widgetData = WidgetData()
+    var widgetSizes: [WidgetKind: WidgetSize] = [:]
     @Published var running: Set<String> = []
     @Published var extras: [FolderApp] = []
     @Published var mouseX: CGFloat? // screen x while magnifying
@@ -83,9 +86,11 @@ final class DockModel: ObservableObject {
                 entries.append(.folder(id: slug, FolderController(config: loadConfig(path), path: path)))
             } else if let name = item.widget, let kind = WidgetKind(rawValue: name) {
                 entries.append(.widget(kind))
+                widgetSizes[kind] = WidgetSize(rawValue: item.size ?? "medium") ?? .medium
             }
         }
         pinned = entries
+        widgetData.kinds = presentWidgets
         refreshRunning()
     }
 
@@ -167,7 +172,7 @@ final class DockModel: ObservableObject {
             switch entry {
             case .app(let app): return ["app": app.id]
             case .folder(let slug, _): return ["folder": slug]
-            case .widget(let kind): return ["widget": kind.rawValue]
+            case .widget(let kind): return ["widget": kind.rawValue, "size": size(of: kind).rawValue]
             case .separator: return nil
             }
         }
@@ -208,12 +213,17 @@ final class DockModel: ObservableObject {
         let width: CGFloat
     }
 
-    var hasWidgets: Bool { pinned.contains { if case .widget = $0 { return true } else { return false } } }
+    var hasWidgets: Bool { !presentWidgets.isEmpty }
+    var presentWidgets: Set<WidgetKind> { Set(pinned.compactMap { if case .widget(let k) = $0 { return k } else { return nil } }) }
+    func size(of kind: WidgetKind) -> WidgetSize { widgetSizes[kind] ?? .medium }
 
     func width(of entry: DockEntry) -> CGFloat {
         if dragOut && entry.id == dragID { return 0 } // lifted out: the dock closes the gap
         if case .separator = entry { return separatorWidth }
-        if case .widget(let kind) = entry { return config.iconSize * kind.span + spacing * (kind.span - 1) }
+        if case .widget(let kind) = entry {
+            let span = kind.span(size(of: kind))
+            return config.iconSize * span + spacing * max(span - 1, 0)
+        }
         return config.iconSize
     }
 
@@ -339,7 +349,7 @@ struct DockView: View {
                     let width = dragged && model.dragOut ? model.width(of: slot.entry) : slot.width
                     let dropTarget = slot.entry.id == model.dropFolder
                     DockTile(entry: slot.entry, size: size, width: width, running: model.isRunning(slot.entry),
-                             widget: widgetView(slot.entry, height: size),
+                             widget: widgetView(slot.entry, height: size, width: width),
                              bounceTick: model.bounceTick[slot.entry.id, default: 0],
                              agent: model.agentState(slot.entry), badge: model.badge(slot.entry),
                              menu: menu(slot.entry),
@@ -400,9 +410,10 @@ struct DockView: View {
         }
     }
 
-    func widgetView(_ entry: DockEntry, height: CGFloat) -> AnyView? {
+    func widgetView(_ entry: DockEntry, height: CGFloat, width: CGFloat) -> AnyView? {
         guard case .widget(let kind) = entry else { return nil }
-        return AnyView(WidgetTile(kind: kind, height: height, data: model.widgetData, agents: model.agents))
+        return AnyView(WidgetTile(kind: kind, size: model.size(of: kind), height: height, width: width,
+                                  data: model.widgetData, agents: model.agents))
     }
 }
 
@@ -829,8 +840,12 @@ final class DockController: NSObject, NSApplicationDelegate {
             folder.toggle(anchor: NSPoint(x: centerX, y: top))
         case .widget(let kind):
             switch kind {
-            case .nowPlaying: model.widgetData.playPause()
-            case .clock: NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Calendar.app"))
+            case .nowPlaying: model.widgetData.control("playpause")
+            case .timer: model.widgetData.toggleTimer()
+            case .clock, .calendar: NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Calendar.app"))
+            case .weather: NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Weather.app"))
+            case .system, .network: NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"))
+            case .storage: NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.settings.Storage")!)
             case .battery: NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Battery-Settings.extension")!)
             case .agents:
                 // Jump to the app with the most urgent agent.
@@ -930,13 +945,30 @@ final class DockController: NSObject, NSApplicationDelegate {
         let icons = IconStyle.allCases.map { style in
             DockMenuItem(title: style.title, checked: style == IconStyle.current) { [weak self] in self?.setIconStyle(style) }
         }
-        let widgets = [WidgetKind.nowPlaying, .clock, .battery, .agents].map { kind in
+        let tints = IconTint.allCases.map { tint in
+            DockMenuItem(title: tint.title, checked: tint == IconTint.current) { [weak self] in self?.setTint(tint) }
+        }
+        let sizes: [(String, CGFloat)] = [("Small", 44), ("Medium", 52), ("Large", 60)]
+        let iconSizes = sizes.map { name, value in
+            DockMenuItem(title: name, checked: model.config.iconSize == value) { [weak self] in self?.setLayout(iconSize: value) }
+        }
+        let factor = model.config.magnifiedSize / model.config.iconSize
+        let magnify: [(String, CGFloat)] = [("Off", 1), ("Subtle", 1.3), ("Normal", 1.6), ("Big", 1.9)]
+        let magnifications = magnify.map { name, value in
+            DockMenuItem(title: name, checked: abs(factor - value) < 0.08) { [weak self] in self?.setLayout(magnification: value) }
+        }
+        let widgets = WidgetKind.allCases.map { kind in
             DockMenuItem(title: kind.title, checked: present.contains(kind)) { [weak self] in self?.toggleWidget(kind) }
         }
         let configURL = URL(fileURLWithPath: model.configPath)
         return .submenu("BetterDock", [
             .submenu("Theme", themes),
             .submenu("Icon Style", icons),
+            .submenu("Icon Tint", tints),
+            .submenu("Icon Size", iconSizes),
+            .submenu("Magnification", magnifications),
+            DockMenuItem(title: "Hide Automatically", checked: model.config.autohide) { [weak self] in self?.setLayout(autohide: !(self?.model.config.autohide ?? true)) },
+            DockMenuItem(title: "-"),
             .submenu("Widgets", widgets),
             DockMenuItem(title: "-"),
             DockMenuItem(title: "Edit Settings…") { NSWorkspace.shared.open(configURL) },
@@ -952,8 +984,37 @@ final class DockController: NSObject, NSApplicationDelegate {
         } else {
             model.pinned.append(.widget(kind))
         }
+        widgetsChanged()
+    }
+
+    func resizeWidget(_ kind: WidgetKind, _ size: WidgetSize) {
+        model.widgetSizes[kind] = size
+        model.objectWillChange.send()
+        widgetsChanged()
+    }
+
+    func widgetsChanged() {
+        model.widgetData.kinds = model.presentWidgets
         model.saveOrder()
+        model.widgetData.active = false
         model.widgetData.active = model.revealed && model.hasWidgets
+    }
+
+    func setTint(_ tint: IconTint) {
+        IconTint.current = tint
+        model.objectWillChange.send()
+        for folder in model.folders { folder.state.objectWillChange.send() }
+        model.saveSetting("iconTint", tint.rawValue)
+    }
+
+    /// Size, magnification and auto-hide shape the window, so the Dock restarts to apply them.
+    func setLayout(iconSize: CGFloat? = nil, magnification: CGFloat? = nil, autohide: Bool? = nil) {
+        let icon = iconSize ?? model.config.iconSize
+        let factor = magnification ?? model.config.magnifiedSize / model.config.iconSize
+        model.saveSetting("iconSize", icon)
+        model.saveSetting("magnifiedSize", (icon * factor).rounded())
+        if let autohide { model.saveSetting("autohide", autohide) }
+        relaunch()
     }
 
     func setIconStyle(_ style: IconStyle) {
@@ -986,11 +1047,27 @@ final class DockController: NSObject, NSApplicationDelegate {
                 },
             ]
         case .widget(let kind):
-            return [DockMenuItem(title: "Remove \(kind.title) Widget") { [weak self] in
+            var items: [DockMenuItem] = [.submenu("Size", WidgetSize.allCases.map { size in
+                DockMenuItem(title: size.title, checked: model.size(of: kind) == size) { [weak self] in self?.resizeWidget(kind, size) }
+            })]
+            if kind == .timer {
+                items.append(.submenu("Length", [15, 25, 50].map { minutes in
+                    DockMenuItem(title: "\(minutes) minutes", checked: Int(model.widgetData.timerLength / 60) == minutes) { [weak self] in
+                        self?.model.widgetData.setTimerLength(minutes)
+                    }
+                }))
+                items.append(DockMenuItem(title: "Reset Timer") { [weak self] in self?.model.widgetData.resetTimer() })
+            }
+            if kind == .nowPlaying {
+                items.append(DockMenuItem(title: "Next Track") { [weak self] in self?.model.widgetData.control("next track") })
+                items.append(DockMenuItem(title: "Previous Track") { [weak self] in self?.model.widgetData.control("previous track") })
+            }
+            items.append(DockMenuItem(title: "Remove Widget") { [weak self] in
                 guard let self else { return }
                 self.model.pinned.removeAll { $0.id == entry.id }
-                self.model.saveOrder()
-            }]
+                self.widgetsChanged()
+            })
+            return items
         case .folder(_, let folder):
             var items = [DockMenuItem(title: "Rename Folder…") { [weak self] in self?.rename(folder) }]
             items += folder.apps.filter { model.running.contains($0.id) }.map { app in
@@ -1012,6 +1089,36 @@ let configData = try! Data(contentsOf: URL(fileURLWithPath: "\(resources)/dock.j
 let dockConfig = try! JSONDecoder().decode(DockConfig.self, from: configData)
 Theme.current = Theme(rawValue: dockConfig.theme ?? "glass") ?? .glass
 IconStyle.current = IconStyle(rawValue: dockConfig.iconStyle ?? "default") ?? .standard
+IconTint.current = IconTint(rawValue: dockConfig.iconTint ?? "wallpaper") ?? .wallpaper
+
+if let i = CommandLine.arguments.firstIndex(of: "--icon-test"), i + 1 < CommandLine.arguments.count {
+    // Renders every app in the Dock and its folders in each icon style, one row per style.
+    _ = NSApplication.shared
+    if let screen = NSScreen.main { Theme.loadWallpaperTint(for: screen) }
+    var paths = dockConfig.items.compactMap(\.app)
+    for slug in dockConfig.items.compactMap(\.folder) { paths += loadConfig("\(resources)/folders/\(slug).json").apps }
+    paths = paths.filter { FileManager.default.fileExists(atPath: $0) }
+    let cell: CGFloat = 76, rows = IconStyle.allCases.count
+    let canvas = NSImage(size: NSSize(width: cell * CGFloat(paths.count) + 20, height: cell * CGFloat(rows) + 20))
+    canvas.lockFocus()
+    NSColor(calibratedRed: 0.17, green: 0.2, blue: 0.3, alpha: 1).setFill()
+    NSRect(origin: .zero, size: canvas.size).fill()
+    for (r, style) in IconStyle.allCases.enumerated() {
+        for (c, path) in paths.enumerated() {
+            let icon = IconRenderer.image(id: path, source: NSWorkspace.shared.icon(forFile: path), style: style)
+            icon.draw(in: NSRect(x: 10 + CGFloat(c) * cell + 4, y: canvas.size.height - 10 - CGFloat(r + 1) * cell + 4, width: cell - 8, height: cell - 8))
+        }
+    }
+    canvas.unlockFocus()
+    let rep = NSBitmapImageRep(data: canvas.tiffRepresentation!)!
+    try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--widget-test") {
+    WidgetSelfTest.run()
+    exit(0)
+}
 
 if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "--snapshot" {
     // Renders the dock over the bottom of your wallpaper with demo agent dots and badges.
@@ -1047,12 +1154,7 @@ if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "--snapshot" {
     }
     exit(0)
 }
-if let screen = NSScreen.main {
-    Theme.loadWallpaperTint(for: screen)
-    if #available(macOS 15.0, *) {
-        IconStyle.tint = Theme.wallpaperTint.mix(with: .white, by: 0.45) // tinted icons follow the wallpaper
-    }
-}
+if let screen = NSScreen.main { Theme.loadWallpaperTint(for: screen) }
 let dockModel = DockModel(config: dockConfig, folderDir: "\(resources)/folders")
 dockModel.configPath = "\(resources)/dock.json"
 let controller = DockController(model: dockModel)

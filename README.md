@@ -14,8 +14,9 @@ Apps that live in a folder never take up a spot in the Dock, even while they run
 - **Right-click menus.** Open, hide, quit, new folder, rename folder, remove from folder, plus a BetterDock menu for themes, icon styles, widgets and settings.
 - **Magnification, auto-hide and launch bounce,** with spring-based motion that respects Reduce Motion.
 - **Themes.** Glass, Wallpaper (tinted to your wallpaper) and Ember, switchable from any right-click menu.
-- **Icon styles.** Default, Dark, Clear and Tinted, rendered from each app's own icon.
-- **Widgets.** Now Playing (Spotify and Music), Clock, Battery and an agent summary, as wide tiles in the Dock.
+- **Icon styles.** Default, Dark, Clear and Tinted, using the same icon variants macOS draws for each app, with seven tint colours.
+- **Widgets.** Now Playing, Calendar, Weather, Clock, Focus Timer, System, Network, Storage, Battery and Agents. Each one is Small, Medium or Large from its right-click menu.
+- **Personal.** Icon size, magnification, auto-hide, theme, icon style and tint are all one right-click away.
 
 Apple's Dock keeps running in the background, so Cmd-Tab, Mission Control and app badges still work. It just never appears.
 
@@ -39,11 +40,17 @@ To remove it and bring Apple's Dock back:
 ./uninstall.sh
 ```
 
-Unread badges are read from Apple's Dock, so BetterDock asks for Accessibility access the first time it starts. The Now Playing widget asks once for permission to talk to Spotify or Music.
+Unread badges are read from Apple's Dock, so BetterDock asks for Accessibility access the first time it starts. The Now Playing widget asks once for permission to talk to Spotify or Music, and the Calendar widget asks for calendar access. Weather comes from Open-Meteo for the city in your Mac's time zone; nothing else leaves your Mac.
+
+To check what each widget reads on your Mac:
+
+```bash
+~/Applications/BetterDock.app/Contents/MacOS/BetterDock --widget-test
+```
 
 ## Configure
 
-Most settings live in the right-click menu. Right-click any icon and open **BetterDock** for Theme, Icon Style, Widgets, **Edit Settings…** and **Show Settings in Finder**. Folders are managed from their own menus: new folder, rename, remove from folder.
+Most settings live in the right-click menu. Right-click any icon and open **BetterDock** for Theme, Icon Style, Icon Tint, Icon Size, Magnification, Hide Automatically, Widgets, **Edit Settings…** and **Show Settings in Finder**. Right-click a widget to resize it. Folders are managed from their own menus: new folder, rename, remove from folder.
 
 Everything is stored as JSON in `config/` (the first run copies it from `examples/`): `config/dock.json` for the Dock and `config/folders/<name>.json` for each folder. Save `dock.json` in any editor and the Dock reloads with the change. Reordering, folder edits, theme and widget choices are written back to the same files.
 
@@ -89,10 +96,11 @@ BetterDock is an accessory app that draws a borderless panel at the Dock's windo
 Sources/
   Shared/Folder.swift   folder model, grid view, panel and motion
   Shared/Status.swift   themes, agent dots, badges
-  Shared/IconStyle.swift  dark, clear and tinted icon rendering
+  Shared/IconStyle.swift  dark, clear and tinted icons
+  Shared/SystemIcons.swift  the icon variants macOS renders (IconServices)
   DockApp/main.swift    the Dock: layout, magnification, drag and drop, menus
   DockApp/Live.swift    agent status watcher, badge reader, poof effect
-  DockApp/Widgets.swift Now Playing, clock, battery and agent widgets
+  DockApp/Widgets.swift ten widgets and their data sources
 hooks/                  Claude Code and Codex status hooks
 examples/               starter configuration
 ```

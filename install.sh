@@ -33,6 +33,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSCalendarsFullAccessUsageDescription</key><string>Shows your next event in the Calendar widget.</string>
+  <key>NSAppleEventsUsageDescription</key><string>Shows and controls what Spotify or Music is playing in the Now Playing widget.</string>
   <key>BDConfigDir</key><string>$PWD/config</string>
 </dict></plist>
 PLIST
