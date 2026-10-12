@@ -1,0 +1,31 @@
+{
+  "autohide": true,
+  "badges": true,
+  "hidden": [],
+  "iconSize": 52,
+  "items": [
+    {
+      "app": "/System/Library/CoreServices/Finder.app"
+    },
+    {
+      "app": "/Applications/Safari.app"
+    },
+    {
+      "app": "/System/Applications/Mail.app"
+    },
+    {
+      "app": "/System/Applications/Messages.app"
+    },
+    {
+      "folder": "dev"
+    },
+    {
+      "app": "/System/Applications/Music.app"
+    },
+    {
+      "app": "/System/Applications/System Settings.app"
+    }
+  ],
+  "magnifiedSize": 84,
+  "theme": "glass"
+}

@@ -1,0 +1,10 @@
+{
+  "apps": [
+    "/Applications/Xcode.app",
+    "/System/Applications/Utilities/Terminal.app",
+    "/Applications/Visual Studio Code.app",
+    "/Applications/Cursor.app"
+  ],
+  "columns": 4,
+  "name": "Dev"
+}
