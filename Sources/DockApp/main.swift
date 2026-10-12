@@ -1,6 +1,7 @@
 // BetterDock: a replacement Dock with app folders. Apple's Dock stays running but hidden.
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Config
 
@@ -26,6 +27,7 @@ enum DockEntry: Identifiable {
     case app(FolderApp)
     case folder(id: String, FolderController)
     case widget(WidgetKind)
+    case trash
     case separator(String)
 
     var id: String {
@@ -33,6 +35,7 @@ enum DockEntry: Identifiable {
         case .app(let app): return app.id
         case .folder(let id, _): return "folder:" + id
         case .widget(let kind): return "widget:" + kind.rawValue
+        case .trash: return "trash"
         case .separator(let id): return "separator:" + id
         }
     }
@@ -107,7 +110,7 @@ final class DockModel: ObservableObject {
         switch entry {
         case .app(let app): return agents[app.id]
         case .folder(_, let folder): return folder.config.apps.compactMap { agents[$0] }.max()
-        case .widget, .separator: return nil
+        case .widget, .trash, .separator: return nil
         }
     }
 
@@ -115,7 +118,7 @@ final class DockModel: ObservableObject {
         switch entry {
         case .app(let app): return badges[app.id]
         case .folder(_, let folder): return combinedBadge(folder.config.apps.compactMap { badges[$0] })
-        case .widget, .separator: return nil
+        case .widget, .trash, .separator: return nil
         }
     }
 
@@ -173,14 +176,16 @@ final class DockModel: ObservableObject {
             case .app(let app): return ["app": app.id]
             case .folder(let slug, _): return ["folder": slug]
             case .widget(let kind): return ["widget": kind.rawValue, "size": size(of: kind).rawValue]
-            case .separator: return nil
+            case .trash, .separator: return nil
             }
         }
         writeConfig(json)
     }
 
+    @Published var trashFull = false
+
     var entries: [DockEntry] {
-        extras.isEmpty ? pinned : pinned + [.separator("running")] + extras.map { .app($0) }
+        pinned + [.separator("running")] + extras.map { .app($0) } + [.trash]
     }
 
     var barHeight: CGFloat { config.iconSize + padding * 2 }
@@ -200,7 +205,7 @@ final class DockModel: ObservableObject {
         switch entry {
         case .app(let app): return running.contains(app.id)
         case .folder(_, let folder): return folder.apps.contains { running.contains($0.id) }
-        case .widget, .separator: return false
+        case .widget, .trash, .separator: return false
         }
     }
 
@@ -312,6 +317,7 @@ struct DockView: View {
     let activate: (DockEntry, CGFloat) -> Void
     let menu: (DockEntry) -> [DockMenuItem]
     let reorder: (DockEntry, DragPhase, CGPoint) -> Void
+    var dropHandler: (DockEntry) -> (([URL]) -> Void)? = { _ in nil }
 
     var body: some View {
         let slots = model.slots()
@@ -352,10 +358,13 @@ struct DockView: View {
                              widget: widgetView(slot.entry, height: size, width: width),
                              bounceTick: model.bounceTick[slot.entry.id, default: 0],
                              agent: model.agentState(slot.entry), badge: model.badge(slot.entry),
-                             menu: menu(slot.entry),
+                             menu: { menu(slot.entry) },
+                             trashFull: model.trashFull,
+                             dropFiles: dropHandler(slot.entry),
                              drag: model.isPinned(slot.entry) ? { phase, point in reorder(slot.entry, phase, point) } : nil) {
                         activate(slot.entry, slot.centerX)
                     }
+                        .equatable()
                         .scaleEffect(dragged ? 1.08 : (dropTarget ? 1.18 : 1))
                         .opacity(dragged && model.dragOut ? 0.6 : 1)
                         .shadow(color: .black.opacity(dragged ? 0.3 : 0), radius: 8, y: 4)
@@ -393,7 +402,8 @@ struct DockView: View {
         .offset(y: model.revealed || Motion.reduce ? 0 : model.barHeight + model.bottomMargin + 12)
         .opacity(model.revealed || !Motion.reduce ? 1 : 0)
         .animation(model.revealed ? .spring(duration: 0.3, bounce: 0) : .spring(duration: 0.2, bounce: 0), value: model.revealed)
-        .animation(.spring(duration: 0.22, bounce: 0), value: model.mouseX) // fluid tracking; retargets every mouse event
+        // Magnification follows the cursor directly, like Apple's Dock; only entering and leaving animate.
+        .animation(.spring(duration: 0.25, bounce: 0), value: model.mouseX == nil)
         .animation(Motion.open, value: model.extras.map(\.id))
         .animation(.spring(duration: 0.3, bounce: 0), value: model.pinned.map(\.id))
         .animation(.spring(duration: 0.3, bounce: 0), value: model.dragOut)
@@ -406,6 +416,7 @@ struct DockView: View {
         case .app(let app): return app.name
         case .folder(_, let folder): return folder.config.name
         case .widget(let kind): return kind == .nowPlaying ? (model.widgetData.track?.title ?? kind.title) : kind.title
+        case .trash: return "Trash"
         case .separator: return ""
         }
     }
@@ -432,6 +443,60 @@ struct DockBar: View {
     var body: some View {
         Theme.current.surface(RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
+}
+
+/// Right-click menu built from DockMenuItems at the moment of the click, never during rendering.
+struct RightClickMenu: NSViewRepresentable {
+    let items: () -> [DockMenuItem]
+
+    func makeNSView(context: Context) -> RightClickView { RightClickView() }
+    func updateNSView(_ view: RightClickView, context: Context) { view.items = items }
+}
+
+final class RightClickView: NSView {
+    var items: () -> [DockMenuItem] = { [] }
+    private var actions: [MenuAction] = []
+
+    // Only right-clicks (and control-clicks) land here; everything else falls through to SwiftUI.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let event = NSApp.currentEvent else { return nil }
+        let right = event.type == .rightMouseDown || (event.type == .leftMouseDown && event.modifierFlags.contains(.control))
+        return right ? super.hitTest(point) : nil
+    }
+
+    override func rightMouseDown(with event: NSEvent) { popUp(event) }
+    override func mouseDown(with event: NSEvent) { popUp(event) }
+
+    private func popUp(_ event: NSEvent) {
+        actions = []
+        NSMenu.popUpContextMenu(build(items()), with: event, for: self)
+    }
+
+    private func build(_ list: [DockMenuItem]) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for item in list {
+            if item.title == "-" { menu.addItem(.separator()); continue }
+            let entry = NSMenuItem(title: item.title, action: nil, keyEquivalent: "")
+            if !item.children.isEmpty {
+                entry.submenu = build(item.children)
+            } else {
+                let action = MenuAction(item.action)
+                actions.append(action)
+                entry.target = action
+                entry.action = #selector(MenuAction.run)
+            }
+            if item.checked == true { entry.state = .on }
+            menu.addItem(entry)
+        }
+        return menu
+    }
+}
+
+final class MenuAction: NSObject {
+    let run_: () -> Void
+    init(_ run: @escaping () -> Void) { run_ = run }
+    @objc func run() { run_() }
 }
 
 struct DockMenuItem: Identifiable {
@@ -490,7 +555,20 @@ struct DockMenuLeaves: View {
 
 enum DragPhase { case began, changed, ended }
 
-struct DockTile: View {
+struct DockTile: View, Equatable {
+    /// Tiles whose size and state did not change skip their body while the cursor moves.
+    static func == (a: DockTile, b: DockTile) -> Bool {
+        a.entry.id == b.entry.id && a.size == b.size && a.width == b.width && a.running == b.running
+            && a.bounceTick == b.bounceTick && a.agent == b.agent && a.badge == b.badge && a.trashFull == b.trashFull
+            && a.widget == nil && b.widget == nil && a.folderKey == b.folderKey
+    }
+
+    /// Folder tiles redraw when their apps or the icon style change.
+    var folderKey: String {
+        guard case .folder(_, let folder) = entry else { return "" }
+        return folder.config.apps.joined() + IconStyle.current.rawValue + IconTint.current.rawValue
+    }
+
     let entry: DockEntry
     let size: CGFloat
     let width: CGFloat
@@ -499,11 +577,14 @@ struct DockTile: View {
     let bounceTick: Int
     let agent: AgentState?
     let badge: String?
-    let menu: [DockMenuItem]
+    let menu: () -> [DockMenuItem]
+    var trashFull = false
+    var dropFiles: (([URL]) -> Void)? = nil
     let drag: ((DragPhase, CGPoint) -> Void)?
     let tap: () -> Void
     @State private var pressed = false
     @State private var dragging = false
+    @State private var dropTargeted = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -515,6 +596,9 @@ struct DockTile: View {
                     FolderTileIcon(apps: folder.apps, size: size)
                 case .widget:
                     widget
+                case .trash:
+                    Image(nsImage: NSImage(named: trashFull ? NSImage.trashFullName : NSImage.trashEmptyName) ?? NSImage())
+                        .resizable().interpolation(.high)
                 case .separator:
                     EmptyView()
                 }
@@ -568,13 +652,23 @@ struct DockTile: View {
                     }
                 }
         )
-        .contextMenu {
-            if case .app(let app) = entry {
-                AppMenu(app: app, running: running, open: tap)
-                if !menu.isEmpty { Divider() }
+        .scaleEffect(dropTargeted ? 1.12 : 1)
+        .animation(.spring(duration: 0.25, bounce: 0.2), value: dropTargeted)
+        .onDrop(of: [UTType.fileURL], isTargeted: dropFiles == nil ? nil : $dropTargeted) { providers in
+            guard let dropFiles else { return false }
+            var urls: [URL] = []
+            let group = DispatchGroup()
+            for provider in providers {
+                group.enter()
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    if let url { DispatchQueue.main.async { urls.append(url) } }
+                    group.leave()
+                }
             }
-            DockMenuContent(items: menu)
+            group.notify(queue: .main) { dropFiles(urls) }
+            return true
         }
+        .overlay(RightClickMenu(items: menu)) // built only when you right-click
     }
 }
 
@@ -607,7 +701,8 @@ final class DockController: NSObject, NSApplicationDelegate {
         panel.hasShadow = false
         panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)))
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        panel.contentView = NSHostingView(rootView: DockView(model: model, activate: activate, menu: menu, reorder: reorder))
+        panel.contentView = NSHostingView(rootView: DockView(model: model, activate: activate, menu: menu, reorder: reorder,
+                                                             dropHandler: { [weak self] in self?.dropHandler($0) }))
         layoutWindow()
         panel.orderFrontRegardless()
 
@@ -617,6 +712,7 @@ final class DockController: NSObject, NSApplicationDelegate {
         revealWatch = model.$revealed.sink { [weak self] revealed in
             guard let self else { return }
             self.model.widgetData.active = revealed && self.model.hasWidgets
+            if revealed { self.refreshTrash() }
         }
 
         agentWatcher.onChange = { [weak self] agents in
@@ -854,6 +950,8 @@ final class DockController: NSObject, NSApplicationDelegate {
                     NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: path), configuration: .init())
                 }
             }
+        case .trash:
+            openTrash()
         case .separator:
             break
         }
@@ -979,6 +1077,64 @@ final class DockController: NSObject, NSApplicationDelegate {
         ])
     }
 
+    // MARK: Trash
+
+    func openTrash() {
+        NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".Trash"))
+    }
+
+    private let finderQueue = DispatchQueue(label: "finder")
+
+    /// Asks Finder whether the Trash has anything in it (macOS asks once for permission).
+    func refreshTrash() {
+        finderQueue.async { [weak self] in
+            var error: NSDictionary?
+            let count = NSAppleScript(source: "tell application \"Finder\" to count items of trash")?
+                .executeAndReturnError(&error).int32Value ?? 0
+            DispatchQueue.main.async {
+                if self?.model.trashFull != (count > 0) { self?.model.trashFull = count > 0 }
+            }
+        }
+    }
+
+    func emptyTrash() {
+        let alert = NSAlert()
+        alert.messageText = "Are you sure you want to permanently erase the items in the Trash?"
+        alert.informativeText = "You can't undo this action."
+        alert.addButton(withTitle: "Empty Trash")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        NSApp.activate()
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        finderQueue.async { [weak self] in
+            var error: NSDictionary?
+            NSAppleScript(source: "tell application \"Finder\" to empty trash")?.executeAndReturnError(&error)
+            DispatchQueue.main.async {
+                NSSound(named: "Purr")?.play()
+                self?.refreshTrash()
+            }
+        }
+    }
+
+    /// Files dropped on the Trash go to the Trash; dropped on an app, they open with it.
+    func dropHandler(_ entry: DockEntry) -> (([URL]) -> Void)? {
+        switch entry {
+        case .trash:
+            return { [weak self] urls in
+                NSWorkspace.shared.recycle(urls) { _, _ in
+                    NSSound(named: "Pop")?.play()
+                    self?.refreshTrash()
+                }
+            }
+        case .app(let app):
+            return { urls in
+                NSWorkspace.shared.open(urls, withApplicationAt: app.url, configuration: NSWorkspace.OpenConfiguration())
+            }
+        default:
+            return nil
+        }
+    }
+
     func toggleWidget(_ kind: WidgetKind) {
         if model.pinned.contains(where: { $0.id == "widget:" + kind.rawValue }) {
             model.pinned.removeAll { $0.id == "widget:" + kind.rawValue }
@@ -1037,8 +1193,18 @@ final class DockController: NSObject, NSApplicationDelegate {
     func entryMenu(_ entry: DockEntry) -> [DockMenuItem] {
         switch entry {
         case .app(let app):
-            guard model.isPinned(entry) else { return [] } // running-only tiles get the basic app menu
-            return [
+            let runningApp = NSWorkspace.shared.runningApplications.first { $0.bundleURL?.path == app.id }
+            var items = [
+                DockMenuItem(title: runningApp == nil ? "Open" : "Show") { [weak self] in self?.activate(entry, centerX: 0) },
+                DockMenuItem(title: "Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([app.url]) },
+            ]
+            if let runningApp {
+                items += [DockMenuItem(title: "-"),
+                          DockMenuItem(title: "Hide") { runningApp.hide() },
+                          DockMenuItem(title: "Quit") { runningApp.terminate() }]
+            }
+            guard model.isPinned(entry) else { return items } // running-only tiles get the basic app menu
+            return items + [DockMenuItem(title: "-")] + [
                 DockMenuItem(title: "New Folder with \(app.name)") { [weak self] in self?.newFolder(with: app) },
                 DockMenuItem(title: "Remove from Dock") { [weak self] in
                     guard let self, let slot = self.model.slots().first(where: { $0.entry.id == entry.id }) else { return }
@@ -1069,6 +1235,12 @@ final class DockController: NSObject, NSApplicationDelegate {
                 self.widgetsChanged()
             })
             return items
+        case .trash:
+            return [
+                DockMenuItem(title: "Open") { [weak self] in self?.openTrash() },
+                DockMenuItem(title: "-"),
+                DockMenuItem(title: "Empty Trash…") { [weak self] in self?.emptyTrash() },
+            ]
         case .folder(_, let folder):
             var items = [DockMenuItem(title: "Rename Folder…") { [weak self] in self?.rename(folder) }]
             items += folder.apps.filter { model.running.contains($0.id) }.map { app in
@@ -1113,6 +1285,33 @@ if let i = CommandLine.arguments.firstIndex(of: "--icon-test"), i + 1 < CommandL
     canvas.unlockFocus()
     let rep = NSBitmapImageRep(data: canvas.tiffRepresentation!)!
     try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--bench") {
+    // Sweeps a simulated cursor across the Dock and times layout + render per frame.
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let model = DockModel(config: dockConfig, folderDir: "\(resources)/folders")
+    model.agents = ["/Applications/Claude.app": .working]
+    let host = NSHostingView(rootView: DockView(model: model, activate: { _, _ in }, menu: { _ in [] }, reorder: { _, _, _ in }))
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: model.screen.frame.width, height: model.windowHeight),
+                          styleMask: [.borderless], backing: .buffered, defer: false)
+    window.contentView = host
+    window.orderFrontRegardless()
+    let bar = model.baseBarRect()
+    var times: [Double] = []
+    for i in 0..<300 {
+        model.mouseX = bar.minX + bar.width * CGFloat(i % 150) / 150
+        let start = CFAbsoluteTimeGetCurrent()
+        RunLoop.main.run(until: Date())
+        host.layoutSubtreeIfNeeded()
+        host.display()
+        times.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
+    }
+    let sorted = times.dropFirst(10).sorted()
+    print(String(format: "frame ms: median %.2f, p95 %.2f, max %.2f (budget 8.3 at 120 Hz)",
+                 sorted[sorted.count / 2], sorted[Int(Double(sorted.count) * 0.95)], sorted.last!))
     exit(0)
 }
 

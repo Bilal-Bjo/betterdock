@@ -129,7 +129,10 @@ final class WidgetData: ObservableObject {
     func refresh() {
         if kinds.contains(.battery) { battery = Self.readBattery() }
         if kinds.contains(.system) { readSystem() }
-        if kinds.contains(.calendar) { readCalendar() }
+        if kinds.contains(.calendar), Date().timeIntervalSince(calendarReadAt) > 60 {
+            calendarReadAt = Date()
+            readCalendar()
+        }
         if kinds.contains(.network) { readNetwork() }
         if kinds.contains(.storage) { readStorage() }
         if kinds.contains(.aiUsage), Date().timeIntervalSince(usageReadAt) > 20 {
@@ -346,6 +349,7 @@ final class WidgetData: ObservableObject {
     // MARK: Calendar
 
     private var calendarRequested = false
+    private var calendarReadAt = Date.distantPast
 
     private func readCalendar() {
         let status = EKEventStore.authorizationStatus(for: .event)
