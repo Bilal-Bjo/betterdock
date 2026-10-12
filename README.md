@@ -96,6 +96,12 @@ BetterDock is native Swift and SwiftUI with no dependencies. Looping animations 
 
 ## Install
 
+**The easy way:** ask your coding agent (Claude Code, Codex, Cursor…):
+
+> Install BetterDock by following https://github.com/Bilal-Bjo/betterdock/blob/main/INSTALL.md
+
+**By hand:**
+
 ```bash
 git clone https://github.com/Bilal-Bjo/betterdock.git
 cd betterdock
