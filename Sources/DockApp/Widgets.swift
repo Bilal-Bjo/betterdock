@@ -514,14 +514,15 @@ struct WidgetTile: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: height * 0.22, style: .continuous)
         ZStack {
-            shape.fill(Color.black.opacity(Theme.current == .ember ? 0.55 : 0.28))
-                .overlay(shape.strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+            shape.fill(Theme.current.widgetFill)
+                .overlay(shape.strokeBorder(Theme.current.widgetStroke, lineWidth: 0.5))
             content
                 .padding(height * 0.12)
                 .foregroundStyle(.white)
         }
         .frame(width: width, height: height)
         .clipShape(shape)
+        .environment(\.colorScheme, .dark)
     }
 
     private func font(_ scale: CGFloat, _ weight: Font.Weight = .regular, rounded: Bool = false) -> Font {
@@ -669,7 +670,7 @@ struct WidgetTile: View {
                     VStack(alignment: .leading, spacing: height * 0.04) {
                         ForEach(Array(data.events.prefix(rich ? 2 : 1).enumerated()), id: \.offset) { _, event in
                             HStack(spacing: height * 0.08) {
-                                Capsule().fill(Theme.current == .ember ? Theme.emberRed : Color(red: 1, green: 0.66, blue: 0.16))
+                                Capsule().fill(Theme.current.accent)
                                     .frame(width: 3, height: height * 0.3)
                                 VStack(alignment: .leading, spacing: 0) {
                                     Text(event.title).font(font(0.17, .semibold)).lineLimit(1)

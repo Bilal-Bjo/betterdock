@@ -2,6 +2,7 @@
 # Build BetterDock and install it.
 #   ./install.sh          install to ~/Applications, start at login, hide Apple's Dock
 #   ./install.sh --try    build and run once; nothing is installed and Apple's Dock is untouched
+#   ./install.sh --dist   build a standalone build/BetterDock.app for /Applications (settings in Application Support)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -11,15 +12,23 @@ build="build"
 app="$build/$name.app"
 dest="$HOME/Applications/$name.app"
 
+mode="${1:-}"
+
 # First run: start from the example configuration.
-if [[ ! -f config/dock.json ]]; then
+if [[ "$mode" != "--dist" && ! -f config/dock.json ]]; then
   mkdir -p config/folders
   cp examples/dock.json config/dock.json
   cp examples/folders/*.json config/folders/
 fi
 
-rm -rf "$app" && mkdir -p "$app/Contents/MacOS"
+rm -rf "$app" && mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 swiftc -O -target arm64-apple-macos14.0 -o "$app/Contents/MacOS/$name" Sources/Shared/*.swift Sources/DockApp/*.swift
+# A standalone app seeds ~/Library/Application Support/BetterDock from these on first launch.
+cp -R examples "$app/Contents/Resources/examples"
+
+# Developer builds read and write the repository's config/; standalone builds use Application Support.
+configKey=""
+[[ "$mode" == "--dist" ]] || configKey="<key>BDConfigDir</key><string>$PWD/config</string>"
 
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -35,7 +44,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
   <key>NSCalendarsFullAccessUsageDescription</key><string>Shows your next event in the Calendar widget.</string>
   <key>NSAppleEventsUsageDescription</key><string>Shows and controls what Spotify or Music is playing in the Now Playing widget.</string>
-  <key>BDConfigDir</key><string>$PWD/config</string>
+  $configKey
 </dict></plist>
 PLIST
 
@@ -43,14 +52,19 @@ PLIST
 identity=$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development/ {print $2; exit}')
 codesign --force --sign "${identity:--}" "$app" >/dev/null
 
-if [[ "${1:-}" == "--try" ]] && launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+if [[ "$mode" == "--dist" ]]; then
+  echo "Built $app. Sign it with your Developer ID, notarize it, and ship it in a DMG; it sets itself up on first launch."
+  exit 0
+fi
+
+if [[ "$mode" == "--try" ]] && launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
   echo "BetterDock is already installed. Run ./install.sh to update it, or ./uninstall.sh first to try a build."
   exit 1
 fi
 
 pkill -x "$name" 2>/dev/null || true
 
-if [[ "${1:-}" == "--try" ]]; then
+if [[ "$mode" == "--try" ]]; then
   open "$app"
   echo "BetterDock is running. Push the cursor to the bottom edge to reveal it."
   exit 0

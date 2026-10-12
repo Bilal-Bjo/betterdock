@@ -1,75 +1,6 @@
-// Live status shared by the dock and folders: themes, agent dots, unread badges.
+// Live status shared by the dock and folders: agent dots and unread badges.
 import AppKit
 import SwiftUI
-
-// MARK: - Theme
-
-enum Theme: String {
-    case glass, ember, wallpaper
-
-    static var current: Theme = .glass
-    static var wallpaperTint: Color = .clear
-
-    static let emberRed = Color(red: 0.86, green: 0.12, blue: 0.14)
-
-    var runningDot: Color {
-        switch self {
-        case .ember: return Theme.emberRed
-        default: return .primary.opacity(0.75)
-        }
-    }
-
-    var folderTitle: Color {
-        self == .ember ? Theme.emberRed.opacity(0.9) : .secondary
-    }
-
-    /// Bar and panel surface for the active theme.
-    @ViewBuilder
-    func surface<S: InsettableShape>(_ shape: S) -> some View {
-        switch self {
-        case .glass:
-            GlassSurface(shape: shape, tint: .clear)
-        case .wallpaper:
-            GlassSurface(shape: shape, tint: Theme.wallpaperTint.opacity(0.38))
-        case .ember:
-            shape
-                .fill(LinearGradient(colors: [Color(white: 0.11).opacity(0.94), Color(white: 0.04).opacity(0.96)],
-                                     startPoint: .top, endPoint: .bottom))
-                .overlay(shape.strokeBorder(LinearGradient(colors: [Theme.emberRed.opacity(0.9), Theme.emberRed.opacity(0.15)],
-                                                           startPoint: .top, endPoint: .bottom), lineWidth: 1))
-        }
-    }
-
-    /// Average colour of the current wallpaper, used by the wallpaper theme.
-    static func loadWallpaperTint(for screen: NSScreen) {
-        guard let url = NSWorkspace.shared.desktopImageURL(for: screen),
-              let image = NSImage(contentsOf: url),
-              let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8,
-                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-                                         colorSpaceName: .deviceRGB, bytesPerRow: 4, bitsPerPixel: 32) else { return }
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-        NSGraphicsContext.current?.imageInterpolation = .medium
-        image.draw(in: NSRect(x: 0, y: 0, width: 1, height: 1))
-        NSGraphicsContext.restoreGraphicsState()
-        if let c = rep.colorAt(x: 0, y: 0) { wallpaperTint = Color(nsColor: c) }
-    }
-}
-
-struct GlassSurface<S: InsettableShape>: View {
-    let shape: S
-    let tint: Color
-
-    var body: some View {
-        if #available(macOS 26.0, *), !GlassBackground.useMaterial {
-            Color.clear.glassEffect(.regular.tint(tint), in: shape)
-        } else {
-            shape.fill(Color(white: 0.55).opacity(0.28)) // stand-in for glass in snapshots
-                .overlay(shape.fill(tint))
-                .overlay(shape.strokeBorder(.white.opacity(0.15)))
-        }
-    }
-}
 
 // MARK: - Agent status
 
@@ -113,14 +44,14 @@ struct AgentDot: View {
 
     var body: some View {
         Group {
-            if state == .working && onScreen && !Motion.reduce {
+            if state == .working && onScreen && !Motion.reduce && !Snapshot.active {
                 BreathingDot(color: state.color, size: size)
             } else {
                 dot(state.color)
             }
         }
         .transition(.scale(scale: 0.6).combined(with: .opacity))
-        .help(state.label)
+        .tooltip(state.label)
     }
 
     func dot(_ color: Color) -> some View {
@@ -160,6 +91,46 @@ private struct BreathingDot: NSViewRepresentable {
         pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
         dot.add(pulse, forKey: "breathe")
         view.layer?.addSublayer(dot)
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSView, context: Context) -> CGSize? {
+        CGSize(width: size, height: size)
+    }
+}
+
+/// Two rings that swell out of a tile and fade, once: an agent finished or needs you while the Dock
+/// was hidden. Lives only for the length of the pulse; Core Animation runs it in the render server.
+struct PulseRing: NSViewRepresentable {
+    let color: Color
+    let size: CGFloat
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: size, height: size))
+        view.wantsLayer = true
+        for i in 0..<2 {
+            let ring = CALayer()
+            ring.frame = view.bounds
+            ring.cornerRadius = size * 0.225
+            ring.borderColor = NSColor(color).cgColor
+            ring.borderWidth = 2
+            ring.opacity = 0
+            let grow = CABasicAnimation(keyPath: "transform.scale")
+            grow.fromValue = 0.92
+            grow.toValue = 1.35
+            let fade = CAKeyframeAnimation(keyPath: "opacity")
+            fade.values = [0, 0.9, 0]
+            fade.keyTimes = [0, 0.2, 1]
+            let group = CAAnimationGroup()
+            group.animations = [grow, fade]
+            group.duration = 0.7
+            group.beginTime = CACurrentMediaTime() + Double(i) * 0.22
+            group.timingFunction = CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
+            ring.add(group, forKey: "pulse")
+            view.layer?.addSublayer(ring)
+        }
         return view
     }
 

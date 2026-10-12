@@ -84,8 +84,9 @@ final class BadgeReader {
     /// Poll often while the Dock is on screen, rarely while it is hidden.
     var visible = false
 
-    func start() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+    /// The first launch leaves the prompt to onboarding, which explains it first.
+    func start(prompt: Bool) {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options) // shows the permission prompt once
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             guard let self else { return }
@@ -149,5 +150,65 @@ struct PoofView: View {
             withAnimation(.timingCurve(0.23, 1, 0.32, 1, duration: 0.45)) { burst = true }
         }
         .allowsHitTesting(false)
+    }
+}
+
+// MARK: - Agent signals
+
+/// Which agent events play a sound while the Dock is hidden.
+enum AgentSound: String, CaseIterable {
+    case attention, all, off
+
+    var title: String {
+        switch self {
+        case .attention: return "When an Agent Needs You"
+        case .all: return "When an Agent Needs You or Finishes"
+        case .off: return "Off"
+        }
+    }
+
+    func plays(_ state: AgentState) -> Bool {
+        switch self {
+        case .attention: return state == .attention
+        case .all: return state != .working
+        case .off: return false
+        }
+    }
+}
+
+extension DockController {
+    /// An agent finished or needs you while the Dock is hidden: a soft sound now, and a pulse on its
+    /// tile the next time the Dock shows. Runs only when agent files change.
+    func announce(from old: [String: AgentState], to new: [String: AgentState]) {
+        guard agentsLoaded, !model.revealed else { return }
+        let arrived = new.filter { path, state in state != .working && old[path] != state }
+        guard let loudest = arrived.values.max() else { return }
+        if agentSound.plays(loudest), let sound = NSSound(named: loudest == .attention ? "Glass" : "Tink") {
+            sound.volume = 0.35
+            sound.play()
+        }
+        for (path, state) in arrived { pendingPulses[path] = max(pendingPulses[path] ?? state, state) }
+    }
+
+    func playPendingPulses() {
+        guard !pendingPulses.isEmpty else { return }
+        var pulses: [String: AgentState] = [:]
+        for (path, state) in pendingPulses where model.agents[path] == state {
+            let tile = model.entries.first { entry in
+                switch entry {
+                case .app(let app): return app.id == path
+                case .folder(_, let folder): return folder.config.apps.contains(path)
+                default: return false
+                }
+            }
+            if let id = tile?.id { pulses[id] = max(pulses[id] ?? state, state) }
+        }
+        pendingPulses = [:]
+        guard !pulses.isEmpty else { return }
+        // Start once the Dock has slid in, and drop the rings when they finish.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.model.pulses = pulses
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { self?.model.pulses = [:] }
+        }
     }
 }

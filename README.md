@@ -35,13 +35,13 @@ The Dock fills up. Every app you run takes a spot, and there is no way to group 
 <td width="50%" valign="top">
 
 ### 📁 Folders
-A folder springs open above its tile. Hover for half a second to peek. Right-click any app for **New Folder**, drag apps in and back out, rename it.
+A folder springs open above its tile. Hover for half a second to peek. Right-click any app for **New Folder**, drag apps in and back out, rename it, give it a colour.
 
 </td>
 <td width="50%" valign="top">
 
 ### 🟠 Agent status
-A dot on the app your Claude Code or Codex agent runs in: **amber** while it works, **green** when it's done, **red** when it needs you.
+A dot on the app your Claude Code or Codex agent runs in: **amber** while it works, **green** when it's done, **red** when it needs you. A soft sound when one needs you while the Dock is hidden.
 
 </td>
 </tr>
@@ -55,7 +55,7 @@ Now Playing, **AI Usage** (weekly Claude and Codex limits), Calendar, Weather, C
 <td valign="top">
 
 ### 🎨 Make it yours
-Themes, plus Default, Dark, Clear and Tinted icon styles drawn from the variants macOS designs for each app. Icon size, magnification and auto-hide, one right-click away.
+Five themes (Glass, Graphite, Paper, Midnight and Wallpaper, tinted to your desktop) and Default, Dark, Clear and Tinted icon styles drawn from the variants macOS designs for each app.
 
 </td>
 </tr>
@@ -70,6 +70,20 @@ Reorder with a drag, drop an app on a folder to file it, drag a running app in t
 
 ### 🗑️ A real Trash
 Full or empty at a glance. Click to open, drop files to delete, right-click to empty.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🔀 Profiles
+Work, Personal and Focus layouts, each with its own icons, folders and widgets. Switch from the menu, or let them switch by time of day or Wi-Fi network.
+
+</td>
+<td valign="top">
+
+### 🖥️ Every display
+The Dock follows you to whichever screen you push the cursor to the bottom of, like Apple's. A short setup on first launch gets you going.
 
 </td>
 </tr>
@@ -165,16 +179,16 @@ The **AI Usage** widget shows this week's limits. Codex usage is read from its l
 
 ## Configure
 
-Right-click any icon and open **BetterDock** for theme, icon style, tint, icon size, magnification, auto-hide, widgets, **Edit Settings…** and **Show Settings in Finder**. Right-click a widget to resize it, a folder to rename it.
+Right-click any icon and open **BetterDock** for Profile, Theme, Icon Style, Icon Tint, Icon Size, Magnification, Hide Automatically, Widgets, Agent Sounds, Hide Apple's Dock, Open at Login, Setup…, **Edit Settings…** and **Show Settings in Finder**. Right-click a widget to resize it, a folder to rename or colour it.
 
-Everything is plain JSON in `config/` (the first run copies `examples/`). Save `dock.json` in any editor and the Dock reloads.
+Everything is plain JSON in `~/Library/Application Support/BetterDock/` (`config/` in the repo for a developer install), copied from `examples/` on first launch. Save `dock.json` in any editor and the Dock reloads.
 
 <details>
-<summary><b>Example configuration</b></summary>
+<summary><b>Settings reference</b></summary>
 
 <br>
 
-`config/dock.json`
+`dock.json`
 
 ```json
 {
@@ -184,6 +198,7 @@ Everything is plain JSON in `config/` (the first run copies `examples/`). Save `
   "badges": true,
   "theme": "glass",
   "iconStyle": "default",
+  "agentSound": "attention",
   "hidden": ["/Applications/Some Background App.app"],
   "items": [
     { "app": "/System/Library/CoreServices/Finder.app" },
@@ -193,34 +208,73 @@ Everything is plain JSON in `config/` (the first run copies `examples/`). Save `
 }
 ```
 
-`config/folders/dev.json`
+| Key | Values |
+| --- | --- |
+| `theme` | `glass`, `graphite`, `paper`, `midnight`, `wallpaper` |
+| `iconStyle` | `default`, `dark`, `clear`, `tinted` |
+| `iconTint` | `wallpaper`, `yellow`, `blue`, `pink`, `green`, `purple`, `graphite` |
+| `agentSound` | `attention` (default), `all`, `off` |
+| `items` | the layout: `app`, `folder` or `widget` (with `size`: `small`, `medium`, `large`) |
+| `profile`, `profiles` | the current profile, and each profile's saved `items` |
+| `profileRules`, `autoProfile` | rules that switch profiles on their own, and whether they run |
+| `onboarded` | `true` once setup has been shown |
+
+`folders/dev.json`
 
 ```json
 {
   "name": "Dev",
   "columns": 4,
+  "color": "blue",
   "apps": ["/Applications/Xcode.app", "/System/Applications/Utilities/Terminal.app"],
   "labels": { "/Applications/Xcode.app": "Xcode" }
 }
 ```
 
+A folder's `color` is `graphite` (the default), `red`, `orange`, `yellow`, `green`, `blue` or `purple`.
+
+</details>
+
+<details>
+<summary><b>Profiles and switching rules</b></summary>
+
+<br>
+
+**BetterDock ▸ Profile ▸ New Profile…** saves the current layout under a name; from then on each profile keeps its own icons, folders and widgets, and switching swaps them in place. Rules are checked once a minute and when the Mac wakes; the first match wins, and a profile you pick by hand stays until a different rule starts to apply.
+
+```json
+"profileRules": [
+  { "profile": "Work", "days": ["weekdays"], "from": "09:00", "to": "18:00" },
+  { "profile": "Work", "wifi": "Office" },
+  { "profile": "Focus", "days": ["sat", "sun"] }
+]
+```
+
+`days` takes `mon` to `sun`, `weekdays` and `weekends`; a time window may cross midnight. Wi-Fi rules need the network name, which recent macOS versions only share with apps allowed to use Location.
+
 </details>
 
 ## How it works
 
-BetterDock is an accessory app that draws a borderless panel at the Dock's window level. It tracks the cursor with event monitors to reveal, magnify and hide, launches apps through `NSWorkspace`, and watches launches and quits to decide which icons to show.
+BetterDock is an accessory app that draws a borderless panel at the Dock's window level, on the display you last pushed the cursor to the bottom of. It tracks the cursor with event monitors to reveal, magnify and hide, launches apps through `NSWorkspace`, watches launches and quits to decide which icons to show, and opens at login through `SMAppService`.
 
 ```
 Sources/
-  Shared/Folder.swift       folder model, grid view, panel and motion
-  Shared/Status.swift       themes, agent dots, badges
-  Shared/IconStyle.swift    dark, clear and tinted icons
-  Shared/SystemIcons.swift  the icon variants macOS renders (IconServices)
-  DockApp/main.swift        the Dock: layout, magnification, drag and drop, menus
-  DockApp/Live.swift        agent status, unread badges, poof effect
-  DockApp/Widgets.swift     widgets and their data sources
-hooks/                      Claude Code and Codex hooks, status line
-examples/                   starter configuration
+  Shared/Folder.swift          folder model, grid view, panel and motion
+  Shared/Theme.swift           the five themes and the wallpaper's dominant colour
+  Shared/Status.swift          agent dots, pulses, badges
+  Shared/IconStyle.swift       dark, clear and tinted icons
+  Shared/SystemIcons.swift     the icon variants macOS renders (IconServices)
+  DockApp/main.swift           the Dock: layout, magnification, drag and drop, menus
+  DockApp/Live.swift           agent status, unread badges, poof effect
+  DockApp/Widgets.swift        widgets and their data sources
+  DockApp/Setup.swift          settings folder, login item, hiding and restoring Apple's Dock
+  DockApp/Onboarding.swift     first-run setup
+  DockApp/Profiles.swift       profiles and their switching rules
+  DockApp/Updater.swift        Sparkle updates for release builds
+hooks/                         Claude Code and Codex hooks, status line
+examples/                      starter configuration
+release/, packaging/           signed release builds (see RELEASING.md)
 ```
 
 Icon styles use IconServices, a private macOS framework, to draw the dark and monochrome icons Apple designs for each app. If a macOS update changes it, BetterDock falls back to its own renderer.

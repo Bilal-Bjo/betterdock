@@ -6,21 +6,26 @@ import UniformTypeIdentifiers
 // MARK: - Config
 
 struct DockConfig: Decodable {
-    struct Item: Decodable {
-        let app: String?
-        let folder: String?
-        let widget: String?
-        let size: String?
+    struct Item: Codable {
+        var app: String?
+        var folder: String?
+        var widget: String?
+        var size: String?
     }
     let iconSize: CGFloat
     let magnifiedSize: CGFloat
     let autohide: Bool
     let items: [Item]
     let hidden: [String]? // apps that never get a tile, even while running
-    let theme: String?    // glass | ember | wallpaper
+    let theme: String?    // glass | graphite | paper | midnight | wallpaper
     let badges: Bool?     // read unread badges from Apple's Dock (needs Accessibility)
     let iconStyle: String? // default | dark | clear | tinted
     let iconTint: String?  // wallpaper | yellow | blue | pink | green | purple | graphite
+    let onboarded: Bool?
+    let agentSound: String? // attention | all | off
+    let profile: String?
+    let profileRules: [ProfileRule]?
+    let autoProfile: Bool?
 }
 
 enum DockEntry: Identifiable {
@@ -41,6 +46,18 @@ enum DockEntry: Identifiable {
     }
 }
 
+/// The display under the cursor, where the Dock starts.
+func screenUnderCursor() -> NSScreen {
+    let p = NSEvent.mouseLocation
+    return NSScreen.screens.first { NSMouseInRect(p, $0.frame, false) } ?? NSScreen.main ?? NSScreen.screens[0]
+}
+
+extension NSScreen {
+    var displayID: CGDirectDisplayID {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+    }
+}
+
 func appEntry(_ path: String) -> FolderApp? {
     guard FileManager.default.fileExists(atPath: path) else { return nil }
     let name = FileManager.default.displayName(atPath: path).replacingOccurrences(of: ".app", with: "")
@@ -51,7 +68,7 @@ func appEntry(_ path: String) -> FolderApp? {
 
 final class DockModel: ObservableObject {
     let config: DockConfig
-    @Published var pinned: [DockEntry]
+    @Published var pinned: [DockEntry] = []
     @Published var dragID: String?
     @Published var dragX: CGFloat = 0
     @Published var dragY: CGFloat = 0
@@ -70,7 +87,9 @@ final class DockModel: ObservableObject {
     @Published var revealed = true
     @Published var bouncing: Set<String> = []
     @Published var bounceTick: [String: Int] = [:] // each increment plays one launch hop
-    var screen: NSScreen = NSScreen.main!
+    @Published var wiggleTick: [String: Int] = [:] // a folder wiggles each time an app is dragged over it
+    @Published var pulses: [String: AgentState] = [:] // tiles playing a one-shot agent pulse
+    var screen: NSScreen = screenUnderCursor()
 
     let padding: CGFloat = 8
     let spacing: CGFloat = 6
@@ -80,21 +99,38 @@ final class DockModel: ObservableObject {
     init(config: DockConfig, folderDir: String) {
         self.config = config
         self.folderDir = folderDir
+        pinned = entries(for: config.items)
+        widgetData.kinds = presentWidgets
+        refreshRunning()
+    }
+
+    /// Builds tiles for a layout; folders whose file has gone missing are skipped.
+    func entries(for items: [DockConfig.Item]) -> [DockEntry] {
         var entries: [DockEntry] = []
-        for item in config.items {
+        for item in items {
             if let path = item.app, let app = appEntry(path) {
                 entries.append(.app(app))
             } else if let slug = item.folder {
                 let path = "\(folderDir)/\(slug).json"
-                entries.append(.folder(id: slug, FolderController(config: loadConfig(path), path: path)))
+                if let folder = loadConfig(path) { entries.append(.folder(id: slug, FolderController(config: folder, path: path))) }
             } else if let name = item.widget, let kind = WidgetKind(rawValue: name) {
                 entries.append(.widget(kind))
                 widgetSizes[kind] = WidgetSize(rawValue: item.size ?? "medium") ?? .medium
             }
         }
-        pinned = entries
-        widgetData.kinds = presentWidgets
-        refreshRunning()
+        return entries
+    }
+
+    /// The pinned tiles as dock.json items.
+    var items: [[String: String]] {
+        pinned.compactMap { entry -> [String: String]? in
+            switch entry {
+            case .app(let app): return ["app": app.id]
+            case .folder(let slug, _): return ["folder": slug]
+            case .widget(let kind): return ["widget": kind.rawValue, "size": size(of: kind).rawValue]
+            case .trash, .separator: return nil
+            }
+        }
     }
 
     var folders: [FolderController] {
@@ -141,7 +177,10 @@ final class DockModel: ObservableObject {
         let target = isApp ? others.first { slot in
             if case .folder = slot.entry { return abs(slot.centerX - x) < slot.size * 0.3 } else { return false }
         } : nil
-        if dropFolder != target?.entry.id { dropFolder = target?.entry.id }
+        if dropFolder != target?.entry.id {
+            dropFolder = target?.entry.id
+            if let id = dropFolder { wiggleTick[id, default: 0] += 1 }
+        }
         if target != nil { return }
         let to = others.filter { $0.centerX < x }.count
         if to != from {
@@ -161,9 +200,13 @@ final class DockModel: ObservableObject {
     }
 
     func saveSetting(_ key: String, _ value: Any) {
+        updateConfig { $0[key] = value }
+    }
+
+    func updateConfig(_ change: (inout [String: Any]) -> Void) {
         guard let data = FileManager.default.contents(atPath: configPath),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-        json[key] = value
+        change(&json)
         writeConfig(json)
     }
 
@@ -171,14 +214,7 @@ final class DockModel: ObservableObject {
     func saveOrder() {
         guard let data = FileManager.default.contents(atPath: configPath),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-        json["items"] = pinned.compactMap { entry -> [String: String]? in
-            switch entry {
-            case .app(let app): return ["app": app.id]
-            case .folder(let slug, _): return ["folder": slug]
-            case .widget(let kind): return ["widget": kind.rawValue, "size": size(of: kind).rawValue]
-            case .trash, .separator: return nil
-            }
-        }
+        json["items"] = items
         writeConfig(json)
     }
 
@@ -290,14 +326,15 @@ final class DockModel: ObservableObject {
 struct FolderTileIcon: View {
     let apps: [FolderApp]
     let size: CGFloat
+    var color: FolderColor = .graphite
 
     var body: some View {
         let body = size * 0.84            // macOS icon body sits inside an 84% grid
         let gap = body * 0.07
         let cell = (body - body * 0.17 * 2 - gap * 2) / 3 // 17% inner padding keeps icons off the edges
         RoundedRectangle(cornerRadius: size * 0.225, style: .continuous)
-            .fill(LinearGradient(colors: [Color(white: 0.38), Color(white: 0.2)], startPoint: .top, endPoint: .bottom))
-            .overlay(RoundedRectangle(cornerRadius: size * 0.225, style: .continuous).strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+            .fill(LinearGradient(colors: color.gradient, startPoint: .top, endPoint: .bottom))
+            .overlay(RoundedRectangle(cornerRadius: size * 0.225, style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
             .overlay(
                 Grid(horizontalSpacing: gap, verticalSpacing: gap) {
                     ForEach(0..<3, id: \.self) { row in
@@ -348,14 +385,8 @@ struct DockView: View {
                 let x = (dragged ? model.dragX : slot.centerX) - model.originX
                 switch slot.entry {
                 case .separator:
-                    Group {
-                        if Theme.current == .ember {
-                            Circle().fill(Theme.emberRed.opacity(0.8)).frame(width: 5, height: 5)
-                        } else {
-                            Capsule().fill(.primary.opacity(0.25)).frame(width: 1, height: model.config.iconSize * 0.7)
-                        }
-                    }
-                    .position(x: x, y: iconBottom - model.config.iconSize / 2)
+                    Theme.current.separator(height: model.config.iconSize * 0.7)
+                        .position(x: x, y: iconBottom - model.config.iconSize / 2)
                 default:
                     let size = dragged && model.dragOut ? model.config.iconSize : slot.size
                     let width = dragged && model.dragOut ? model.width(of: slot.entry) : slot.width
@@ -363,6 +394,8 @@ struct DockView: View {
                     DockTile(entry: slot.entry, size: size, width: width, running: model.isRunning(slot.entry),
                              widget: widgetView(slot.entry, height: size, width: width),
                              bounceTick: model.bounceTick[slot.entry.id, default: 0],
+                             wiggleTick: model.wiggleTick[slot.entry.id, default: 0],
+                             pulse: model.pulses[slot.entry.id],
                              agent: model.agentState(slot.entry), badge: model.badge(slot.entry),
                              trashFull: model.trashFull,
                              drag: canDrag(slot.entry) ? { phase, point in reorder(slot.entry, phase, point) } : nil) {
@@ -375,6 +408,7 @@ struct DockView: View {
                         .overlay(alignment: .top) {
                             if dragged && model.dragOut {
                                 Text("Remove").font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(Theme.current.labelText)
                                     .padding(.horizontal, 8).padding(.vertical, 3)
                                     .background(LabelBackground())
                                     .fixedSize()
@@ -396,6 +430,7 @@ struct DockView: View {
             if let hovered, model.dragID == nil {
                 Text(title(of: hovered.entry))
                     .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.current.labelText)
                     .padding(.horizontal, 10).padding(.vertical, 4)
                     .background(LabelBackground())
                     .fixedSize()
@@ -404,7 +439,7 @@ struct DockView: View {
         }
         .frame(width: model.windowWidth, height: h, alignment: .topLeading)
         .environment(\.onScreen, model.revealed)
-        .onDrop(of: [UTType.fileURL], delegate: DockDrop(model: model, handler: dropHandler))
+        .modifier(FileDrop(model: model, handler: dropHandler))
         .offset(y: model.revealed || Motion.reduce ? 0 : model.barHeight + model.bottomMargin + 12)
         .opacity(model.revealed || !Motion.reduce ? 1 : 0)
         .animation(model.revealed ? .spring(duration: 0.3, bounce: 0) : .spring(duration: 0.2, bounce: 0), value: model.revealed)
@@ -441,20 +476,31 @@ struct DockView: View {
     }
 }
 
-/// Pill behind tooltips; snapshots get a solid fill because the renderer can't draw materials.
+/// Pill behind tooltips, in the theme's colours.
 struct LabelBackground: View {
     var body: some View {
-        if GlassBackground.useMaterial {
-            Capsule().fill(Color(white: 0.16).opacity(0.85))
-        } else {
-            Capsule().fill(.regularMaterial)
-        }
+        Capsule().fill(Theme.current.labelFill)
+            .overlay(Capsule().strokeBorder(Theme.current.widgetStroke, lineWidth: 0.5))
     }
 }
 
 struct DockBar: View {
     var body: some View {
         Theme.current.surface(RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+}
+
+/// Snapshots skip the drop target: the image renderer draws it as an unsupported-view placeholder.
+struct FileDrop: ViewModifier {
+    let model: DockModel
+    let handler: (DockEntry) -> (([URL]) -> Void)?
+
+    func body(content: Content) -> some View {
+        if Snapshot.active {
+            content
+        } else {
+            content.onDrop(of: [UTType.fileURL], delegate: DockDrop(model: model, handler: handler))
+        }
     }
 }
 
@@ -514,6 +560,7 @@ enum MenuBuilder {
                 entry.action = #selector(MenuAction.run)
             }
             if item.checked == true { entry.state = .on }
+            entry.isEnabled = item.enabled
             menu.addItem(entry)
         }
         return menu
@@ -530,6 +577,7 @@ struct DockMenuItem: Identifiable {
     let id = UUID()
     let title: String
     var checked: Bool? = nil
+    var enabled = true
     var children: [DockMenuItem] = []
     var action: () -> Void = {}
 
@@ -582,18 +630,40 @@ struct DockMenuLeaves: View {
 
 enum DragPhase { case began, changed, ended }
 
+/// A quick shake that says "drop it here"; the swell comes from the drop-target scale.
+/// Only folder tiles carry the animator, so app tiles stay as cheap as before.
+struct Wiggle: ViewModifier {
+    let tick: Int
+    let enabled: Bool
+
+    func body(content: Content) -> some View {
+        if enabled && !Motion.reduce {
+            content.keyframeAnimator(initialValue: 0.0, trigger: tick) { content, angle in
+                content.rotationEffect(.degrees(angle))
+            } keyframes: { _ in
+                CubicKeyframe(-7, duration: 0.07)
+                CubicKeyframe(6, duration: 0.1)
+                CubicKeyframe(-3, duration: 0.09)
+                SpringKeyframe(0, duration: 0.28, spring: .init(duration: 0.28, bounce: 0.35))
+            }
+        } else {
+            content
+        }
+    }
+}
+
 struct DockTile: View, Equatable {
     /// Tiles whose size and state did not change skip their body while the cursor moves.
     static func == (a: DockTile, b: DockTile) -> Bool {
         a.entry.id == b.entry.id && a.size == b.size && a.width == b.width && a.running == b.running
-            && a.bounceTick == b.bounceTick && a.agent == b.agent && a.badge == b.badge && a.trashFull == b.trashFull
+            && a.bounceTick == b.bounceTick && a.wiggleTick == b.wiggleTick && a.pulse == b.pulse && a.agent == b.agent && a.badge == b.badge && a.trashFull == b.trashFull
             && a.widget == nil && b.widget == nil && a.folderKey == b.folderKey
     }
 
     /// Folder tiles redraw when their apps or the icon style change.
     var folderKey: String {
         guard case .folder(_, let folder) = entry else { return "" }
-        return folder.config.apps.joined() + IconStyle.current.rawValue + IconTint.current.rawValue
+        return folder.config.apps.joined() + IconStyle.current.rawValue + IconTint.current.rawValue + (folder.config.color ?? "")
     }
 
     let entry: DockEntry
@@ -602,10 +672,13 @@ struct DockTile: View, Equatable {
     let running: Bool
     let widget: AnyView?
     let bounceTick: Int
+    let wiggleTick: Int
+    let pulse: AgentState?
     let agent: AgentState?
     let badge: String?
     var trashFull = false
     let drag: ((DragPhase, CGPoint) -> Void)?
+    private var isFolder: Bool { if case .folder = entry { return true } else { return false } }
     let tap: () -> Void
     @State private var pressed = false
     @State private var dragging = false
@@ -617,7 +690,7 @@ struct DockTile: View, Equatable {
                 case .app(let app):
                     StyledIcon(id: app.id, image: app.icon)
                 case .folder(_, let folder):
-                    FolderTileIcon(apps: folder.apps, size: size)
+                    FolderTileIcon(apps: folder.apps, size: size, color: FolderColor(named: folder.config.color))
                 case .widget:
                     widget
                 case .trash:
@@ -645,6 +718,10 @@ struct DockTile: View, Equatable {
                 // Quick rise, then a spring landing: one hop per tick while the app launches.
                 CubicKeyframe(Motion.reduce ? 0 : size * 0.38, duration: 0.24)
                 SpringKeyframe(0, duration: 0.42, spring: .init(duration: 0.42, bounce: 0.3))
+            }
+            .modifier(Wiggle(tick: wiggleTick, enabled: isFolder))
+            .overlay {
+                if let pulse { PulseRing(color: pulse.color, size: size).allowsHitTesting(false) }
             }
 
             Circle()
@@ -699,8 +776,22 @@ final class DockController: NSObject, NSApplicationDelegate {
     var revealWatch: Any?
     var tileWatch: Any?
     var configWatch: DispatchSourceFileSystemObject?
+    var screens: [NSScreen] = NSScreen.screens
+    var agentsLoaded = false
+    var pendingPulses: [String: AgentState] = [:] // app path -> state that arrived while hidden
+    var agentSound: AgentSound
+    let profiles = ProfileSwitcher()
+    var currentProfile: String?
+    var autoProfile: Bool
+    var onboarding: OnboardingWindow?
 
-    init(model: DockModel) { self.model = model }
+    init(model: DockModel) {
+        self.model = model
+        agentSound = AgentSound(rawValue: model.config.agentSound ?? "") ?? .attention
+        currentProfile = model.config.profile
+        autoProfile = model.config.autoProfile ?? true
+        profiles.rules = model.config.profileRules ?? []
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         panel = DockPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -709,11 +800,11 @@ final class DockController: NSObject, NSApplicationDelegate {
         panel.hasShadow = false
         panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)))
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        panel.appearance = Theme.current.appearance
         panel.contentView = NSHostingView(rootView: DockView(model: model, activate: activate, reorder: reorder,
                                                              dropHandler: { [weak self] in self?.dropHandler($0) }))
         layoutWindow()
         panel.orderFrontRegardless()
-        Updater.start()
         Updater.start()
 
         for case .folder(let id, let folder) in model.pinned { wire(folder, id: id) }
@@ -726,16 +817,19 @@ final class DockController: NSObject, NSApplicationDelegate {
             if revealed {
                 self.refreshTrash()
                 self.badgeReader.poll()
+                self.playPendingPulses()
             }
         }
 
         agentWatcher.onChange = { [weak self] agents in
             guard let self else { return }
             guard self.model.agents != agents else { return }
+            self.announce(from: self.model.agents, to: agents)
             self.model.agents = agents
             for folder in self.model.folders where folder.state.agents != agents { folder.state.agents = agents }
         }
         agentWatcher.start()
+        agentsLoaded = true
         watchConfig()
         if model.config.badges ?? true {
             badgeReader.onChange = { [weak self] badges in
@@ -744,7 +838,7 @@ final class DockController: NSObject, NSApplicationDelegate {
                 self.model.badges = badges
                 for folder in self.model.folders where folder.state.badges != badges { folder.state.badges = badges }
             }
-            badgeReader.start()
+            badgeReader.start(prompt: model.config.onboarded == true)
         }
         model.revealed = !model.config.autohide
         panel.ignoresMouseEvents = model.config.autohide
@@ -773,6 +867,7 @@ final class DockController: NSObject, NSApplicationDelegate {
             self?.mouseMoved()
         }
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.screens = NSScreen.screens
             self?.layoutWindow()
         }
         monitors.append(NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { [weak self] event in
@@ -791,6 +886,10 @@ final class DockController: NSObject, NSApplicationDelegate {
         }
         monitors.append(NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] _ in self?.mouseMoved() } as Any)
         monitors.append(NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] event in self?.mouseMoved(); return event } as Any)
+
+        profiles.onMatch = { [weak self] name in self?.switchProfile(name) }
+        if autoProfile { profiles.start() }
+        if model.config.onboarded != true { showOnboarding() }
     }
 
     func folders() -> [FolderController] { model.folders }
@@ -861,7 +960,8 @@ final class DockController: NSObject, NSApplicationDelegate {
     }
 
     func layoutWindow() {
-        model.screen = NSScreen.main ?? NSScreen.screens[0]
+        // Keep the Dock on its display while that display is connected; screen objects are rebuilt on changes.
+        model.screen = screens.first { $0.displayID == model.screen.displayID } ?? screenUnderCursor()
         let f = model.screen.frame
         let width = model.windowWidth
         let x = max(f.minX, f.midX - width / 2)
@@ -875,8 +975,19 @@ final class DockController: NSObject, NSApplicationDelegate {
     func mouseMoved() {
         if menuOpen { return }
         let p = NSEvent.mouseLocation
-        let screen = model.screen.frame
-        guard NSMouseInRect(p, screen, false) else { return }
+        var screen = model.screen.frame
+        if !NSMouseInRect(p, screen, false) {
+            // Like Apple's Dock, it moves to another display when the cursor reaches that display's bottom edge.
+            guard let other = screens.first(where: { NSMouseInRect(p, $0.frame, false) }) else { return }
+            if p.y <= other.frame.minY + 1, model.dragID == nil, !folders().contains(where: { $0.isOpen }) {
+                move(to: other)
+                screen = other.frame
+            } else {
+                if model.mouseX != nil { model.mouseX = nil }
+                if model.revealed && (hideWork?.isCancelled ?? true) { scheduleHide() }
+                return
+            }
+        }
         // Cheapest path: hidden dock, cursor away from the bottom edge, nothing to update.
         if !model.revealed && model.mouseX == nil && p.y > screen.minY + 1 { return }
         let bar = model.baseBarRect()
@@ -940,6 +1051,16 @@ final class DockController: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Moves the Dock to another display, closing anything left open on the old one.
+    func move(to screen: NSScreen) {
+        for folder in folders() where folder.isOpen { folder.hide() }
+        peekWork?.cancel()
+        model.mouseX = nil
+        model.screen = screen
+        if Theme.loadWallpaperTint(for: screen), IconTint.current == .wallpaper { IconRenderer.flush() }
+        layoutWindow()
+    }
+
     func scheduleHide() {
         guard model.config.autohide else { return }
         hideWork?.cancel()
@@ -948,6 +1069,7 @@ final class DockController: NSObject, NSApplicationDelegate {
             self.model.mouseX = nil
             self.model.revealed = false
             self.panel.ignoresMouseEvents = true
+            self.hideWork = nil
         }
         hideWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
@@ -1046,7 +1168,7 @@ final class DockController: NSObject, NSApplicationDelegate {
         guard let index = model.pinned.firstIndex(where: { $0.id == app.id }) else { return }
         let slug = "folder-\(Int(Date().timeIntervalSince1970))"
         let path = "\(model.folderDir)/\(slug).json"
-        let config = FolderConfig(name: "New Folder", columns: 4, apps: [app.id], labels: nil)
+        let config = FolderConfig(name: "New Folder", columns: 4, apps: [app.id])
         saveConfig(config, to: path)
         let folder = FolderController(config: config, path: path)
         wire(folder, id: slug)
@@ -1086,8 +1208,8 @@ final class DockController: NSObject, NSApplicationDelegate {
     /// Everything about the Dock itself lives under one submenu.
     func settingsMenu() -> DockMenuItem {
         let present = Set(model.pinned.compactMap { if case .widget(let k) = $0 { return k } else { return nil } })
-        let themes = [Theme.glass, .wallpaper, .ember].map { theme in
-            DockMenuItem(title: theme.rawValue.capitalized, checked: theme == Theme.current) { [weak self] in self?.setTheme(theme) }
+        let themes = Theme.allCases.map { theme in
+            DockMenuItem(title: theme.title, checked: theme == Theme.current) { [weak self] in self?.setTheme(theme) }
         }
         let icons = IconStyle.allCases.map { style in
             DockMenuItem(title: style.title, checked: style == IconStyle.current) { [weak self] in self?.setIconStyle(style) }
@@ -1107,8 +1229,16 @@ final class DockController: NSObject, NSApplicationDelegate {
         let widgets = WidgetKind.allCases.map { kind in
             DockMenuItem(title: kind.title, checked: present.contains(kind)) { [weak self] in self?.toggleWidget(kind) }
         }
+        let sounds = AgentSound.allCases.map { sound in
+            DockMenuItem(title: sound.title, checked: sound == agentSound) { [weak self] in
+                self?.agentSound = sound
+                self?.model.saveSetting("agentSound", sound.rawValue)
+            }
+        }
         let configURL = URL(fileURLWithPath: model.configPath)
         return .submenu("BetterDock", [
+            .submenu("Profile", profileMenu()),
+            DockMenuItem(title: "-"),
             .submenu("Theme", themes),
             .submenu("Icon Style", icons),
             .submenu("Icon Tint", tints),
@@ -1117,14 +1247,106 @@ final class DockController: NSObject, NSApplicationDelegate {
             DockMenuItem(title: "Hide Automatically", checked: model.config.autohide) { [weak self] in self?.setLayout(autohide: !(self?.model.config.autohide ?? true)) },
             DockMenuItem(title: "-"),
             .submenu("Widgets", widgets),
+            .submenu("Agent Sounds", sounds),
+            DockMenuItem(title: "-"),
+            DockMenuItem(title: "Hide Apple's Dock", checked: AppleDock.hidden) {
+                if AppleDock.hidden { AppleDock.restore() } else { AppleDock.hide() }
+            },
+            LoginItem.managedByLaunchAgent
+                ? DockMenuItem(title: "Open at Login (install.sh)", checked: true, enabled: false)
+                : DockMenuItem(title: "Open at Login", checked: LoginItem.enabled) { LoginItem.set(!LoginItem.enabled) },
+            DockMenuItem(title: "Setup…") { [weak self] in self?.showOnboarding() },
             DockMenuItem(title: "-"),
             DockMenuItem(title: "Edit Settings…") { NSWorkspace.shared.open(configURL) },
             DockMenuItem(title: "Show Settings in Finder") { NSWorkspace.shared.activateFileViewerSelecting([configURL]) },
             DockMenuItem(title: "Check for Updates…") { Updater.checkForUpdates() },
-            DockMenuItem(title: "Check for Updates…") { Updater.checkForUpdates() },
             DockMenuItem(title: "-"),
-            DockMenuItem(title: "Quit BetterDock") { NSApp.terminate(nil) },
+            DockMenuItem(title: "Quit BetterDock") { [weak self] in self?.quit() },
         ])
+    }
+
+    func showOnboarding() {
+        if let onboarding {
+            onboarding.show()
+            return
+        }
+        let firstRun = model.config.onboarded != true
+        let suggestions = FolderSuggestion.scan(excluding: Set(model.folders.flatMap(\.config.apps)))
+        let icons = model.pinned.compactMap { entry -> NSImage? in
+            if case .app(let app) = entry { return IconRenderer.image(id: app.id, source: app.icon, style: IconStyle.current) }
+            return nil
+        }
+        let state = OnboardingModel(hideDock: firstRun || AppleDock.hidden,
+                                    openAtLogin: LoginItem.managedByLaunchAgent || LoginItem.enabled || firstRun,
+                                    suggestions: suggestions.map { var s = $0; s.on = firstRun; return s },
+                                    wallpaper: wallpaperSlice(for: model.screen), icons: Array(icons.prefix(7)))
+        state.onTheme = { [weak self] theme in self?.setTheme(theme) }
+        let window = OnboardingWindow(model: state)
+        window.onFinish = { [weak self] result in self?.finishOnboarding(result) }
+        window.onClose = { [weak self] in
+            self?.model.saveSetting("onboarded", true)
+            self?.onboarding = nil
+        }
+        onboarding = window
+        window.show()
+    }
+
+    func finishOnboarding(_ result: OnboardingModel) {
+        if result.hideDock != AppleDock.hidden {
+            if result.hideDock { AppleDock.hide() } else { AppleDock.restore() }
+        }
+        LoginItem.set(result.openAtLogin)
+        addFolders(result.suggestions.filter(\.on))
+    }
+
+    /// Creates the chosen suggested folders after the pinned apps, taking their apps out of the Dock.
+    func addFolders(_ suggestions: [FolderSuggestion]) {
+        guard !suggestions.isEmpty else { return }
+        let moved = Set(suggestions.flatMap { $0.apps.map(\.id) })
+        model.pinned.removeAll { if case .app(let app) = $0 { return moved.contains(app.id) } else { return false } }
+        var index = (model.pinned.lastIndex { entry in
+            switch entry {
+            case .app, .folder: return true
+            default: return false
+            }
+        } ?? -1) + 1
+        try? FileManager.default.createDirectory(atPath: model.folderDir, withIntermediateDirectories: true)
+        for suggestion in suggestions {
+            let base = suggestion.name.lowercased()
+            var slug = base
+            var n = 2
+            while FileManager.default.fileExists(atPath: "\(model.folderDir)/\(slug).json") {
+                slug = "\(base)-\(n)"
+                n += 1
+            }
+            let path = "\(model.folderDir)/\(slug).json"
+            let config = FolderConfig(name: suggestion.name, columns: 4, apps: suggestion.apps.map(\.id),
+                                      color: suggestion.color == .graphite ? nil : suggestion.color.rawValue)
+            saveConfig(config, to: path)
+            let folder = FolderController(config: config, path: path)
+            wire(folder, id: slug)
+            model.pinned.insert(.folder(id: slug, folder), at: index)
+            index += 1
+        }
+        model.saveOrder()
+        model.refreshRunning()
+    }
+
+    /// Quitting while Apple's Dock is hidden would leave the Mac without a Dock, so offer to bring it back.
+    func quit() {
+        guard AppleDock.hidden else { NSApp.terminate(nil); return }
+        let alert = NSAlert()
+        alert.messageText = "Bring back Apple's Dock?"
+        alert.informativeText = "Apple's Dock is hidden while BetterDock runs. Restore it with your original settings, or keep it hidden for when BetterDock starts again."
+        alert.addButton(withTitle: "Restore Apple's Dock")
+        alert.addButton(withTitle: "Keep Hidden")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: AppleDock.restore(); NSApp.terminate(nil)
+        case .alertSecondButtonReturn: NSApp.terminate(nil)
+        default: break
+        }
     }
 
     // MARK: Trash
@@ -1234,8 +1456,9 @@ final class DockController: NSObject, NSApplicationDelegate {
 
     /// Switches theme live and remembers it in dock.json.
     func setTheme(_ theme: Theme) {
-        if theme == .wallpaper { Theme.loadWallpaperTint(for: model.screen) }
+        Theme.loadWallpaperTint(for: model.screen)
         Theme.current = theme
+        panel.appearance = theme.appearance
         model.objectWillChange.send()
         for folder in model.folders { folder.state.objectWillChange.send() }
         model.saveSetting("theme", theme.rawValue)
@@ -1300,7 +1523,13 @@ final class DockController: NSObject, NSApplicationDelegate {
                 DockMenuItem(title: "Empty Trash…") { [weak self] in self?.emptyTrash() },
             ]
         case .folder(_, let folder):
-            var items = [DockMenuItem(title: "Rename Folder…") { [weak self] in self?.rename(folder) }]
+            let current = FolderColor(named: folder.config.color)
+            var items = [
+                DockMenuItem(title: "Rename Folder…") { [weak self] in self?.rename(folder) },
+                .submenu("Color", FolderColor.allCases.map { color in
+                    DockMenuItem(title: color.title, checked: color == current) { folder.setColor(color) }
+                }),
+            ]
             items += folder.apps.filter { model.running.contains($0.id) }.map { app in
                 DockMenuItem(title: "Quit \(app.name)") {
                     NSWorkspace.shared.runningApplications.first { $0.bundleURL?.path == app.id }?.terminate()
@@ -1315,10 +1544,10 @@ final class DockController: NSObject, NSApplicationDelegate {
 
 // MARK: - Entry
 
-let resources = (Bundle.main.object(forInfoDictionaryKey: "BDConfigDir") as? String) ?? Bundle.main.resourcePath!
-let configData = try! Data(contentsOf: URL(fileURLWithPath: "\(resources)/dock.json"))
+AppSetup.seedConfig()
+let configData = try! Data(contentsOf: URL(fileURLWithPath: AppSetup.configPath))
 let dockConfig = try! JSONDecoder().decode(DockConfig.self, from: configData)
-Theme.current = Theme(rawValue: dockConfig.theme ?? "glass") ?? .glass
+Theme.current = Theme(named: dockConfig.theme)
 IconStyle.current = IconStyle(rawValue: dockConfig.iconStyle ?? "default") ?? .standard
 IconTint.current = IconTint(rawValue: dockConfig.iconTint ?? "wallpaper") ?? .wallpaper
 
@@ -1327,7 +1556,7 @@ if let i = CommandLine.arguments.firstIndex(of: "--icon-test"), i + 1 < CommandL
     _ = NSApplication.shared
     if let screen = NSScreen.main { Theme.loadWallpaperTint(for: screen) }
     var paths = dockConfig.items.compactMap(\.app)
-    for slug in dockConfig.items.compactMap(\.folder) { paths += loadConfig("\(resources)/folders/\(slug).json").apps }
+    for slug in dockConfig.items.compactMap(\.folder) { paths += loadConfig("\(AppSetup.folderDir)/\(slug).json")?.apps ?? [] }
     paths = paths.filter { FileManager.default.fileExists(atPath: $0) }
     let cell: CGFloat = 76, rows = IconStyle.allCases.count
     let canvas = NSImage(size: NSSize(width: cell * CGFloat(paths.count) + 20, height: cell * CGFloat(rows) + 20))
@@ -1350,7 +1579,7 @@ if CommandLine.arguments.contains("--bench") {
     // Sweeps a simulated cursor across the Dock and times layout + render per frame.
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
-    let model = DockModel(config: dockConfig, folderDir: "\(resources)/folders")
+    let model = DockModel(config: dockConfig, folderDir: AppSetup.folderDir)
     model.agents = ["/Applications/Claude.app": .working]
     let host = NSHostingView(rootView: DockView(model: model, activate: { _, _ in }, reorder: { _, _, _ in }))
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: model.windowWidth, height: model.windowHeight),
@@ -1374,6 +1603,35 @@ if CommandLine.arguments.contains("--bench") {
     exit(0)
 }
 
+if let i = CommandLine.arguments.firstIndex(of: "--setup-preview"), i + 1 < CommandLine.arguments.count {
+    // Renders each setup step to <prefix>-1.png … without changing anything.
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    Snapshot.active = true
+    let screen = screenUnderCursor()
+    Theme.loadWallpaperTint(for: screen)
+    let model = DockModel(config: dockConfig, folderDir: AppSetup.folderDir)
+    let icons = model.pinned.compactMap { entry -> NSImage? in
+        if case .app(let app) = entry { return IconRenderer.image(id: app.id, source: app.icon, style: IconStyle.current) }
+        return nil
+    }
+    let state = OnboardingModel(hideDock: true, openAtLogin: true,
+                                suggestions: FolderSuggestion.scan(excluding: Set(model.folders.flatMap(\.config.apps))),
+                                wallpaper: wallpaperSlice(for: screen), icons: Array(icons.prefix(7)))
+    let window = OnboardingWindow(model: state)
+    window.window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+    window.window.orderFrontRegardless()
+    for step in 0..<OnboardingModel.steps {
+        state.step = step
+        RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+        let view = window.window.contentView!
+        let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+        view.cacheDisplay(in: view.bounds, to: rep)
+        try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(CommandLine.arguments[i + 1])-\(step + 1).png"))
+    }
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--widget-test") {
     WidgetSelfTest.run()
     exit(0)
@@ -1381,21 +1639,25 @@ if CommandLine.arguments.contains("--widget-test") {
 
 if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "--snapshot" {
     // Renders the dock over the bottom of your wallpaper with demo agent dots and badges.
-    // Usage: --snapshot out.png [glass|ember|wallpaper]
+    // Usage: --snapshot out.png [glass|graphite|paper|midnight|wallpaper]
     _ = NSApplication.shared
-    if CommandLine.arguments.count >= 4 { Theme.current = Theme(rawValue: CommandLine.arguments[3]) ?? .glass }
+    if CommandLine.arguments.count >= 4 { Theme.current = Theme(named: CommandLine.arguments[3]) }
     let screen = NSScreen.main!
     Theme.loadWallpaperTint(for: screen)
-    GlassBackground.useMaterial = true
-    let model = DockModel(config: dockConfig, folderDir: "\(resources)/folders")
+    Snapshot.active = true
+    let model = DockModel(config: dockConfig, folderDir: AppSetup.folderDir)
     model.agents = ["/Applications/Claude.app": .working, "/Applications/Google Chrome.app": .done]
     model.badges = ["/Applications/WhatsApp.app": "3", "/Applications/Telegram.app": "12"]
     model.extras = []
-    let slots = model.slots()
-    model.mouseX = slots.first { if case .folder = $0.entry { return true } else { return false } }?.centerX
+    let folderSlot = model.slots().first { if case .folder = $0.entry { return true } else { return false } }
+    model.mouseX = folderSlot?.centerX
     let wallpaper = NSWorkspace.shared.desktopImageURL(for: screen).flatMap { NSImage(contentsOf: $0) }
     MainActor.assumeIsolated {
-        let height = model.windowHeight + 60
+        // The first folder is drawn open above its tile, so the panel surface is part of the picture.
+        let folder: FolderController? = { if case .folder(_, let f)? = folderSlot?.entry { return f } else { return nil } }()
+        folder?.state.open = true
+        let panelHeight: CGFloat = folder == nil ? 0 : 300
+        let height = model.windowHeight + 60 + panelHeight
         let view = ZStack(alignment: .bottom) {
             if let wallpaper {
                 Image(nsImage: wallpaper).resizable().aspectRatio(contentMode: .fill)
@@ -1403,19 +1665,30 @@ if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "--snapshot" {
                     .frame(width: screen.frame.width, height: height, alignment: .bottom).clipped()
             }
             DockView(model: model, activate: { _, _ in }, reorder: { _, _, _ in })
+            if let folder, let folderSlot {
+                FolderView(state: folder.state, launch: { _ in }, remove: nil)
+                    .fixedSize()
+                    .frame(width: screen.frame.width, height: height, alignment: .bottom)
+                    .offset(x: folderSlot.centerX - screen.frame.midX, y: -(model.windowHeight - model.bottomMargin - 30))
+            }
         }
         .frame(width: model.screen.frame.width, height: height)
-        .environment(\.colorScheme, .dark)
+        .environment(\.colorScheme, Theme.current.scheme)
         let renderer = ImageRenderer(content: view)
         renderer.scale = 2
-        let rep = NSBitmapImageRep(cgImage: renderer.cgImage!)
+        // The renderer can hand back an HDR (PQ) image; flatten it to sRGB so any viewer shows true colours.
+        let image = renderer.cgImage!
+        let context = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        let rep = NSBitmapImageRep(cgImage: context.makeImage()!)
         try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: CommandLine.arguments[2]))
     }
     exit(0)
 }
-if let screen = NSScreen.main { Theme.loadWallpaperTint(for: screen) }
-let dockModel = DockModel(config: dockConfig, folderDir: "\(resources)/folders")
-dockModel.configPath = "\(resources)/dock.json"
+Theme.loadWallpaperTint(for: screenUnderCursor())
+let dockModel = DockModel(config: dockConfig, folderDir: AppSetup.folderDir)
+dockModel.configPath = AppSetup.configPath
 let controller = DockController(model: dockModel)
 let application = NSApplication.shared
 application.setActivationPolicy(.accessory)

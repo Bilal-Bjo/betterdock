@@ -8,6 +8,30 @@ struct FolderConfig: Codable {
     var columns: Int
     var apps: [String]
     var labels: [String: String]?
+    var color: String?
+}
+
+/// Folder tile colours: graphite by default, or one of six tints.
+enum FolderColor: String, CaseIterable {
+    case graphite, red, orange, yellow, green, blue, purple
+
+    init(named name: String?) { self = FolderColor(rawValue: name ?? "") ?? .graphite }
+
+    var title: String { rawValue.capitalized }
+
+    /// Top and bottom of the tile's gradient: deep enough that the small icons stay legible.
+    var gradient: [Color] {
+        func c(_ r: Double, _ g: Double, _ b: Double) -> Color { Color(red: r, green: g, blue: b) }
+        switch self {
+        case .graphite: return [Color(white: 0.38), Color(white: 0.2)]
+        case .red: return [c(0.86, 0.33, 0.33), c(0.6, 0.15, 0.17)]
+        case .orange: return [c(0.95, 0.56, 0.27), c(0.72, 0.33, 0.1)]
+        case .yellow: return [c(0.95, 0.85, 0.31), c(0.75, 0.6, 0.1)]
+        case .green: return [c(0.38, 0.75, 0.47), c(0.16, 0.48, 0.27)]
+        case .blue: return [c(0.38, 0.6, 0.95), c(0.15, 0.33, 0.7)]
+        case .purple: return [c(0.66, 0.48, 0.92), c(0.4, 0.24, 0.66)]
+        }
+    }
 }
 
 struct FolderApp: Identifiable {
@@ -17,9 +41,9 @@ struct FolderApp: Identifiable {
     let icon: NSImage
 }
 
-func loadConfig(_ path: String) -> FolderConfig {
-    let data = try! Data(contentsOf: URL(fileURLWithPath: path))
-    return try! JSONDecoder().decode(FolderConfig.self, from: data)
+func loadConfig(_ path: String) -> FolderConfig? {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+    return try? JSONDecoder().decode(FolderConfig.self, from: data)
 }
 
 func saveConfig(_ config: FolderConfig, to path: String) {
@@ -146,7 +170,7 @@ struct AppCell: View {
                 Button("Remove from Folder") { remove(app) }
             }
         }
-        .help(app.name)
+        .tooltip(app.name)
     }
 }
 
@@ -206,9 +230,20 @@ struct FolderView: View {
     }
 }
 
-struct GlassBackground: ViewModifier {
-    static var useMaterial = false // snapshots can't render Liquid Glass
+/// Set while rendering --snapshot images: ImageRenderer can't draw glass, AppKit-backed views or tooltips.
+enum Snapshot {
+    static var active = false
+}
 
+extension View {
+    /// A tooltip, skipped in snapshots where it renders as a placeholder.
+    @ViewBuilder
+    func tooltip(_ text: String) -> some View {
+        if Snapshot.active { self } else { help(text) }
+    }
+}
+
+struct GlassBackground: ViewModifier {
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: 28, style: .continuous)
         content
@@ -299,6 +334,11 @@ final class FolderController {
         commit()
     }
 
+    func setColor(_ color: FolderColor) {
+        config.color = color == .graphite ? nil : color.rawValue
+        commit()
+    }
+
     /// Opens the folder growing out of `anchor` (screen point at the top-centre of the trigger).
     func show(anchor: NSPoint) {
         closing = false
@@ -308,6 +348,7 @@ final class FolderController {
         x = min(max(x, screen.frame.minX + 8), screen.frame.maxX - size.width - 8)
         panel.setFrameOrigin(NSPoint(x: x, y: anchor.y - 24)) // 24pt shadow inset in FolderView
 
+        panel.appearance = Theme.current.appearance
         state.running = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.path })
         state.anchorX = min(max((anchor.x - x) / size.width, 0), 1)
         state.open = false

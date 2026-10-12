@@ -5,6 +5,7 @@
     "/Applications/Visual Studio Code.app",
     "/Applications/Cursor.app"
   ],
+  "color": "blue",
   "columns": 4,
   "name": "Dev"
 }
