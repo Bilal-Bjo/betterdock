@@ -13,7 +13,9 @@ Apps that live in a folder never take up a spot in the Dock, even while they run
 - **Drag and drop.** Reorder icons, drop an app onto a folder to add it, or drag it up and away to remove it.
 - **Right-click menus.** Open, hide, quit, new folder, rename folder, remove from folder, theme.
 - **Magnification, auto-hide and launch bounce,** with spring-based motion that respects Reduce Motion.
-- **Themes.** Glass, Wallpaper (tinted to your wallpaper) and Ember.
+- **Themes.** Glass, Wallpaper (tinted to your wallpaper) and Ember, switchable from any right-click menu.
+- **Icon styles.** Default, Dark, Clear and Tinted, rendered from each app's own icon.
+- **Widgets.** Now Playing (Spotify and Music), Clock, Battery and an agent summary, as wide tiles in the Dock.
 
 Apple's Dock keeps running in the background, so Cmd-Tab, Mission Control and app badges still work. It just never appears.
 
@@ -37,7 +39,7 @@ To remove it and bring Apple's Dock back:
 ./uninstall.sh
 ```
 
-Unread badges are read from Apple's Dock, so BetterDock asks for Accessibility access the first time it starts.
+Unread badges are read from Apple's Dock, so BetterDock asks for Accessibility access the first time it starts. The Now Playing widget asks once for permission to talk to Spotify or Music.
 
 ## Configure
 
@@ -50,10 +52,12 @@ The first run copies `examples/` into `config/`. Edit `config/dock.json` for the
   "autohide": true,
   "badges": true,
   "theme": "glass",
+  "iconStyle": "default",
   "hidden": ["/Applications/Some Background App.app"],
   "items": [
     { "app": "/System/Library/CoreServices/Finder.app" },
-    { "folder": "dev" }
+    { "folder": "dev" },
+    { "widget": "nowPlaying" }
   ]
 }
 ```
@@ -83,8 +87,10 @@ BetterDock is an accessory app that draws a borderless panel at the Dock's windo
 Sources/
   Shared/Folder.swift   folder model, grid view, panel and motion
   Shared/Status.swift   themes, agent dots, badges
+  Shared/IconStyle.swift  dark, clear and tinted icon rendering
   DockApp/main.swift    the Dock: layout, magnification, drag and drop, menus
   DockApp/Live.swift    agent status watcher, badge reader, poof effect
+  DockApp/Widgets.swift Now Playing, clock, battery and agent widgets
 hooks/                  Claude Code and Codex status hooks
 examples/               starter configuration
 ```

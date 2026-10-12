@@ -73,9 +73,7 @@ struct AppCell: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            Image(nsImage: app.icon)
-                .resizable()
-                .interpolation(.high)
+            StyledIcon(id: app.id, image: app.icon)
                 .frame(width: 64, height: 64)
                 .overlay(alignment: .topTrailing) {
                     ZStack(alignment: .topTrailing) {
