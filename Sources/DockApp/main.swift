@@ -833,6 +833,7 @@ final class DockController: NSObject, NSApplicationDelegate {
         layoutWindow()
         panel.orderFrontRegardless()
         Updater.start()
+        AppleDock.keepHidden()
 
         for case .folder(let id, let folder) in model.pinned { wire(folder, id: id) }
 
@@ -1280,7 +1281,7 @@ final class DockController: NSObject, NSApplicationDelegate {
             .submenu("Agent Sounds", sounds),
             DockMenuItem(title: "-"),
             DockMenuItem(title: "Hide Apple's Dock", checked: AppleDock.hidden) {
-                if AppleDock.hidden { AppleDock.restore() } else { AppleDock.hide() }
+                if AppleDock.hidden { AppleDock.confirmRestore() } else { AppleDock.hide() }
             },
             LoginItem.managedByLaunchAgent
                 ? DockMenuItem(title: "Open at Login (install.sh)", checked: true, enabled: false)
