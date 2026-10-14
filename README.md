@@ -41,7 +41,7 @@ A folder springs open above its tile. Hover for half a second to peek. Right-cli
 <td width="50%" valign="top">
 
 ### 🟠 Agent status
-A dot on the app your Claude Code or Codex agent runs in: **amber** while it works, **green** when it's done, **red** when it needs you. A soft sound when one needs you while the Dock is hidden.
+A dot on the app your Claude Code or Codex agent runs in: **amber** while it works, **green** when it's done, **red** when it needs you. A sound when one finishes or needs you while the Dock is hidden: pick one of macOS's or drop in your own.
 
 </td>
 </tr>
@@ -214,6 +214,7 @@ Everything is plain JSON in `~/Library/Application Support/BetterDock/` (`config
 | `iconStyle` | `default`, `dark`, `clear`, `tinted` |
 | `iconTint` | `wallpaper`, `yellow`, `blue`, `pink`, `green`, `purple`, `graphite` |
 | `agentSound` | `attention` (default), `all`, `off` |
+| `agentSounds` | the sound for `done` and `attention`: a macOS sound (`Hero`), a file in the `sounds/` folder (`done.mp3`), or `none` |
 | `items` | the layout: `app`, `folder` or `widget` (with `size`: `small`, `medium`, `large`) |
 | `profile`, `profiles` | the current profile, and each profile's saved `items` |
 | `profileRules`, `autoProfile` | rules that switch profiles on their own, and whether they run |

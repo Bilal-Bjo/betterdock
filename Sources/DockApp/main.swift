@@ -23,6 +23,7 @@ struct DockConfig: Decodable {
     let iconTint: String?  // wallpaper | yellow | blue | pink | green | purple | graphite
     let onboarded: Bool?
     let agentSound: String? // attention | all | off
+    let agentSounds: [String: String]? // "done" / "attention": a macOS sound name or a file in sounds/
     let profile: String?
     let profileRules: [ProfileRule]?
     let autoProfile: Bool?
@@ -780,6 +781,7 @@ final class DockController: NSObject, NSApplicationDelegate {
     var agentsLoaded = false
     var pendingPulses: [String: AgentState] = [:] // app path -> state that arrived while hidden
     var agentSound: AgentSound
+    var agentSounds: [String: String] // AgentEvent raw value -> sound choice
     let profiles = ProfileSwitcher()
     var currentProfile: String?
     var autoProfile: Bool
@@ -788,6 +790,7 @@ final class DockController: NSObject, NSApplicationDelegate {
     init(model: DockModel) {
         self.model = model
         agentSound = AgentSound(rawValue: model.config.agentSound ?? "") ?? .attention
+        agentSounds = model.config.agentSounds ?? [:]
         currentProfile = model.config.profile
         autoProfile = model.config.autoProfile ?? true
         profiles.rules = model.config.profileRules ?? []
@@ -1234,7 +1237,10 @@ final class DockController: NSObject, NSApplicationDelegate {
                 self?.agentSound = sound
                 self?.model.saveSetting("agentSound", sound.rawValue)
             }
-        }
+        } + [DockMenuItem(title: "-")] + AgentEvent.allCases.map { soundMenu(for: $0) } + [
+            DockMenuItem(title: "-"),
+            DockMenuItem(title: "Open Sounds Folder") { NSWorkspace.shared.open(SoundLibrary.ensureFolder()) },
+        ]
         let configURL = URL(fileURLWithPath: model.configPath)
         return .submenu("BetterDock", [
             .submenu("Profile", profileMenu()),

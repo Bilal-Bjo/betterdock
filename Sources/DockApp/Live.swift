@@ -1,5 +1,6 @@
 // Live inputs for the dock: agent status files written by Claude Code / Codex hooks, and unread badges.
 import AppKit
+import UniformTypeIdentifiers
 import SwiftUI
 
 // MARK: - Agent status
@@ -176,17 +177,121 @@ enum AgentSound: String, CaseIterable {
     }
 }
 
+/// The two moments an agent can make a sound for, each with its own sound.
+enum AgentEvent: String, CaseIterable {
+    case done, attention
+
+    var menuTitle: String { self == .done ? "Finished Sound" : "Needs You Sound" }
+    var defaultSound: String { self == .done ? "Tink" : "Glass" }
+}
+
+/// Agent sounds: the sounds that come with macOS, plus any audio file put in the sounds folder
+/// next to dock.json. A setting holds either a macOS sound name ("Hero") or a file name ("done.mp3").
+enum SoundLibrary {
+    static let none = "none"
+    static let fileTypes = ["aiff", "aif", "wav", "mp3", "m4a", "caf", "aac"]
+
+    static var folder: URL { URL(fileURLWithPath: AppSetup.configDir).appendingPathComponent("sounds") }
+
+    @discardableResult
+    static func ensureFolder() -> URL {
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder
+    }
+
+    static var systemSounds: [String] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: "/System/Library/Sounds")) ?? []
+        return names.map { ($0 as NSString).deletingPathExtension }.sorted()
+    }
+
+    static var customSounds: [String] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+        return names.filter { fileTypes.contains(($0 as NSString).pathExtension.lowercased()) }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    private static var cache: [String: NSSound] = [:]
+
+    static func sound(_ choice: String) -> NSSound? {
+        if choice == none { return nil }
+        if let cached = cache[choice] { return cached }
+        let file = choice.hasPrefix("/") ? URL(fileURLWithPath: choice) : folder.appendingPathComponent(choice)
+        let loaded = FileManager.default.fileExists(atPath: file.path)
+            ? NSSound(contentsOf: file, byReference: true)
+            : NSSound(named: choice)
+        if let loaded {
+            // macOS's own sounds are loud next to a Dock; files someone picked play as recorded.
+            loaded.volume = systemSounds.contains(choice) ? 0.35 : 0.8
+            cache[choice] = loaded
+        }
+        return loaded
+    }
+
+    static func play(_ choice: String) {
+        guard let sound = sound(choice) else { return }
+        sound.stop()
+        sound.play()
+    }
+
+    /// Asks for an audio file, copies it into the sounds folder and returns its name there.
+    static func importFile() -> String? {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a Sound"
+        panel.allowedContentTypes = fileTypes.compactMap { UTType(filenameExtension: $0) }
+        panel.allowsMultipleSelection = false
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let source = panel.url else { return nil }
+        let target = ensureFolder().appendingPathComponent(source.lastPathComponent)
+        if source.standardizedFileURL != target.standardizedFileURL {
+            try? FileManager.default.removeItem(at: target)
+            do { try FileManager.default.copyItem(at: source, to: target) } catch { return nil }
+        }
+        cache[target.lastPathComponent] = nil
+        return target.lastPathComponent
+    }
+}
+
 extension DockController {
+    func soundChoice(for event: AgentEvent) -> String {
+        agentSounds[event.rawValue] ?? event.defaultSound
+    }
+
+    func setSound(_ choice: String, for event: AgentEvent) {
+        agentSounds[event.rawValue] = choice
+        model.saveSetting("agentSounds", agentSounds)
+        SoundLibrary.play(choice)
+    }
+
+    /// Picking a sound plays it, so the menu doubles as a preview.
+    func soundMenu(for event: AgentEvent) -> DockMenuItem {
+        let current = soundChoice(for: event)
+        let pick = { (choice: String) -> DockMenuItem in
+            DockMenuItem(title: (choice as NSString).deletingPathExtension, checked: choice == current) { [weak self] in
+                self?.setSound(choice, for: event)
+            }
+        }
+        var items = SoundLibrary.systemSounds.map(pick)
+        let custom = SoundLibrary.customSounds
+        if !custom.isEmpty { items += [DockMenuItem(title: "-")] + custom.map(pick) }
+        items += [
+            DockMenuItem(title: "-"),
+            DockMenuItem(title: "No Sound", checked: current == SoundLibrary.none) { [weak self] in
+                self?.setSound(SoundLibrary.none, for: event)
+            },
+            DockMenuItem(title: "Choose File…") { [weak self] in
+                if let name = SoundLibrary.importFile() { self?.setSound(name, for: event) }
+            },
+        ]
+        return .submenu(event.menuTitle, items)
+    }
+
     /// An agent finished or needs you while the Dock is hidden: a soft sound now, and a pulse on its
     /// tile the next time the Dock shows. Runs only when agent files change.
     func announce(from old: [String: AgentState], to new: [String: AgentState]) {
         guard agentsLoaded, !model.revealed else { return }
         let arrived = new.filter { path, state in state != .working && old[path] != state }
         guard let loudest = arrived.values.max() else { return }
-        if agentSound.plays(loudest), let sound = NSSound(named: loudest == .attention ? "Glass" : "Tink") {
-            sound.volume = 0.35
-            sound.play()
-        }
+        if agentSound.plays(loudest) { SoundLibrary.play(soundChoice(for: loudest == .attention ? .attention : .done)) }
         for (path, state) in arrived { pendingPulses[path] = max(pendingPulses[path] ?? state, state) }
     }
 
