@@ -1191,6 +1191,38 @@ final class DockController: NSObject, NSApplicationDelegate {
         model.refreshRunning()
     }
 
+    /// Removes a folder from the Dock. Its apps go back into the Dock where the folder was, so nothing
+    /// is lost; a folder with apps in it asks first, an empty one just goes.
+    func deleteFolder(_ entry: DockEntry, _ folder: FolderController) {
+        let apps = folder.apps
+        if !apps.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "Delete “\(folder.config.name)”?"
+            alert.informativeText = apps.count == 1
+                ? "\(apps[0].name) goes back into the Dock."
+                : "Its \(apps.count) apps go back into the Dock."
+            alert.addButton(withTitle: "Delete Folder")
+            alert.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        folder.hide()
+        guard let index = model.pinned.firstIndex(where: { $0.id == entry.id }) else { return }
+        let slot = model.slots().first { $0.entry.id == entry.id }
+        let returning = apps.filter { app in !model.pinned.contains { $0.id == app.id } }.map { DockEntry.app($0) }
+        model.pinned.replaceSubrange(index...index, with: returning)
+        if let slot {
+            let poof = Poof(point: CGPoint(x: slot.centerX - model.originX,
+                                           y: model.windowHeight - model.bottomMargin - model.barHeight / 2))
+            model.poofs.append(poof)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.model.poofs.removeAll { $0.id == poof.id } }
+        }
+        NSSound(named: "Pop")?.play()
+        if let path = folder.path { try? FileManager.default.removeItem(atPath: path) }
+        model.saveOrder()
+        model.refreshRunning()
+    }
+
     /// Turns an app tile into a new folder containing it, then asks for a name.
     func newFolder(with app: FolderApp) {
         guard let index = model.pinned.firstIndex(where: { $0.id == app.id }) else { return }
@@ -1566,6 +1598,10 @@ final class DockController: NSObject, NSApplicationDelegate {
                     NSWorkspace.shared.runningApplications.first { $0.bundleURL?.path == app.id }?.terminate()
                 }
             }
+            items += [DockMenuItem(title: "-"),
+                      DockMenuItem(title: folder.apps.isEmpty ? "Delete Folder" : "Delete Folder…") { [weak self] in
+                          self?.deleteFolder(entry, folder)
+                      }]
             return items
         case .separator:
             return []
