@@ -227,6 +227,15 @@ enum SoundLibrary {
         return loaded
     }
 
+    private static var previewing: NSSound?
+
+    /// Hovering a sound in the menu plays it; moving to the next one cuts the last one off.
+    static func preview(_ choice: String) {
+        previewing?.stop()
+        previewing = sound(choice)
+        previewing?.play()
+    }
+
     static func play(_ choice: String) {
         guard let sound = sound(choice) else { return }
         sound.stop()
@@ -259,16 +268,16 @@ extension DockController {
     func setSound(_ choice: String, for event: AgentEvent) {
         agentSounds[event.rawValue] = choice
         model.saveSetting("agentSounds", agentSounds)
-        SoundLibrary.play(choice)
+        SoundLibrary.preview(choice)
     }
 
     /// Picking a sound plays it, so the menu doubles as a preview.
     func soundMenu(for event: AgentEvent) -> DockMenuItem {
         let current = soundChoice(for: event)
         let pick = { (choice: String) -> DockMenuItem in
-            DockMenuItem(title: (choice as NSString).deletingPathExtension, checked: choice == current) { [weak self] in
-                self?.setSound(choice, for: event)
-            }
+            DockMenuItem(title: (choice as NSString).deletingPathExtension, checked: choice == current,
+                         action: { [weak self] in self?.setSound(choice, for: event) },
+                         preview: { SoundLibrary.preview(choice) })
         }
         var items = SoundLibrary.systemSounds.map(pick)
         let custom = SoundLibrary.customSounds

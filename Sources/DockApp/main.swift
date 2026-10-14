@@ -556,6 +556,7 @@ enum MenuBuilder {
                 entry.submenu = build(item.children)
             } else {
                 let action = MenuAction(item.action)
+                action.preview = item.preview
                 entry.representedObject = action // keeps the action alive as long as the item
                 entry.target = action
                 entry.action = #selector(MenuAction.run)
@@ -564,12 +565,34 @@ enum MenuBuilder {
             entry.isEnabled = item.enabled
             menu.addItem(entry)
         }
+        if list.contains(where: { $0.preview != nil }) {
+            let delegate = PreviewDelegate()
+            menu.delegate = delegate
+            objc_setAssociatedObject(menu, &PreviewDelegate.key, delegate, .OBJC_ASSOCIATION_RETAIN)
+        }
         return menu
     }
 }
 
+/// Runs an item's preview a moment after it is highlighted, so skimming down a menu stays quiet.
+final class PreviewDelegate: NSObject, NSMenuDelegate {
+    static var key = 0
+    private var pending: DispatchWorkItem?
+
+    func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
+        pending?.cancel()
+        guard let preview = (item?.representedObject as? MenuAction)?.preview else { return }
+        let work = DispatchWorkItem(block: preview)
+        pending = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+    }
+
+    func menuDidClose(_ menu: NSMenu) { pending?.cancel() }
+}
+
 final class MenuAction: NSObject {
     let run_: () -> Void
+    var preview: (() -> Void)?
     init(_ run: @escaping () -> Void) { run_ = run }
     @objc func run() { run_() }
 }
@@ -581,6 +604,7 @@ struct DockMenuItem: Identifiable {
     var enabled = true
     var children: [DockMenuItem] = []
     var action: () -> Void = {}
+    var preview: (() -> Void)? = nil // runs when the item is highlighted in a native menu
 
     static func submenu(_ title: String, _ children: [DockMenuItem]) -> DockMenuItem {
         DockMenuItem(title: title, children: children)
