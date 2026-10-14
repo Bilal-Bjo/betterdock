@@ -85,7 +85,12 @@ cat > "$agent" <<AGENT
 </dict></plist>
 AGENT
 launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$agent"
+# bootout returns before the old job is gone; retry until launchd accepts the new one.
+for attempt in 1 2 3 4 5; do
+  launchctl bootstrap "gui/$(id -u)" "$agent" 2>/dev/null && break
+  [ "$attempt" = 5 ] && { echo "Could not start BetterDock with launchd." >&2; exit 1; }
+  sleep 1
+done
 
 # Apple's Dock keeps running (Cmd-Tab, Mission Control) but never appears: it hides with a very long
 # delay, and is made as small as possible for the few places macOS still shows it (Mission Control).

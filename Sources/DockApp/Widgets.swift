@@ -103,6 +103,9 @@ final class WidgetData: ObservableObject {
     struct Quota: Equatable {
         var percent: Double
         var resets: Date?
+        /// When the number was read. Older than two hours, the widget dims it rather than pass it off as current.
+        var updated: Date?
+        var isStale: Bool { updated.map { Date().timeIntervalSince($0) > 2 * 3600 } ?? false }
     }
 
     @Published var claudeWeek: Quota?
@@ -294,7 +297,8 @@ final class WidgetData: ObservableObject {
             else { resets = ISO8601DateFormatter().date(from: raw) }
         }
         if let resets, resets < Date() { return Quota(percent: 0, resets: nil) } // the week rolled over since
-        return Quota(percent: percent, resets: resets)
+        let updated = (json["updated"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
+        return Quota(percent: percent, resets: resets, updated: updated)
     }
 
     /// Codex writes its rate limits into each session log; the weekly window is 10,080 minutes.
@@ -775,6 +779,7 @@ struct WidgetTile: View {
                                     Text(name).font(font(0.14, .medium)).foregroundStyle(.secondary)
                                     Spacer(minLength: 4)
                                     Text(quota.map { "\(Int($0.percent.rounded()))%" } ?? "–").font(font(0.14, .semibold)).monospacedDigit()
+                                        .opacity(quota?.isStale == true ? 0.45 : 1)
                                     if rich, let resets = quota?.resets {
                                         Text(resets, format: .relative(presentation: .named))
                                             .font(font(0.12)).foregroundStyle(.secondary).lineLimit(1)
@@ -786,8 +791,12 @@ struct WidgetTile: View {
                                     }
                                 }
                                 .frame(height: max(3, height * 0.05))
+                                .opacity(quota?.isStale == true ? 0.45 : 1)
                             }
                         }
+                        .help(quota?.isStale == true
+                              ? "\(name) usage last updated \(quota?.updated?.formatted(.relative(presentation: .named)) ?? "a while ago")"
+                              : "\(name) weekly usage")
                     }
                 }
             }
