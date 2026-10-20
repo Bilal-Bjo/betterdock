@@ -86,8 +86,45 @@ final class FolderState: ObservableObject {
     @Published var dragging: String?
     @Published var dragOffset: CGSize = .zero
     var anchorX: CGFloat = 0.5
+    /// Where the dragged app sat when the drag began, and whether the order changed since.
+    var dragStart: Int?
+    var reordered = false
     /// Called when an app is dragged out of the panel and released: (app path, screen point).
     var onDragOut: (String, NSPoint) -> Void = { _, _ in }
+    /// Called when a drag inside the folder changed the order: the new order of app paths.
+    var onReorder: ([String]) -> Void = { _ in }
+    /// Whether a screen point is over the folder panel.
+    var contains: (NSPoint) -> Bool = { _ in true }
+
+    /// Cells are 92×100 with 8/6 pt gaps.
+    static let step = CGSize(width: 100, height: 106)
+    var layoutColumns: Int { max(1, min(columns, apps.count)) }
+
+    /// Moves the dragged app to the slot under the cursor, so the others slide aside, and returns
+    /// the offset that keeps it under the cursor from its new slot.
+    func drag(_ id: String, by translation: CGSize, at point: NSPoint) -> CGSize {
+        guard let from = apps.firstIndex(where: { $0.id == id }) else { return translation }
+        if dragStart == nil { dragStart = from; reordered = false }
+        let start = dragStart ?? from
+        let cols = layoutColumns, rows = (apps.count + cols - 1) / cols
+        let startCol = start % cols, startRow = start / cols
+        var target = from
+        // Only rearrange while over the folder; dragging out leaves the order alone.
+        if contains(point) {
+            let col = min(max(startCol + Int((translation.width / Self.step.width).rounded()), 0), cols - 1)
+            let row = min(max(startRow + Int((translation.height / Self.step.height).rounded()), 0), rows - 1)
+            target = min(row * cols + col, apps.count - 1)
+        }
+        if target != from {
+            withAnimation(.spring(duration: 0.3, bounce: 0.12)) {
+                apps.move(fromOffsets: IndexSet(integer: from), toOffset: target > from ? target + 1 : target)
+            }
+            reordered = true
+        }
+        let shift = CGSize(width: CGFloat(target % cols - startCol) * Self.step.width,
+                           height: CGFloat(target / cols - startRow) * Self.step.height)
+        return CGSize(width: translation.width - shift.width, height: translation.height - shift.height)
+    }
 }
 
 struct AppCell: View {
@@ -138,15 +175,17 @@ struct AppCell: View {
             value: state.open
         )
         .offset(state.dragging == app.id ? state.dragOffset : .zero)
+        // The dragged icon stays glued to the cursor while the others slide around it.
+        .transaction { if state.dragging == app.id { $0.animation = nil } }
         .zIndex(state.dragging == app.id ? 1 : 0)
         .onHover { hovering = $0 }
         .gesture(
             DragGesture(minimumDistance: 0, coordinateSpace: .global)
                 .onChanged { value in
-                    if hypot(value.translation.width, value.translation.height) > 5 {
+                    if hypot(value.translation.width, value.translation.height) > 5 || state.dragging == app.id {
                         pressed = false
                         state.dragging = app.id
-                        state.dragOffset = value.translation
+                        state.dragOffset = state.drag(app.id, by: value.translation, at: NSEvent.mouseLocation)
                     } else if state.dragging == nil {
                         pressed = true
                     }
@@ -154,10 +193,14 @@ struct AppCell: View {
                 .onEnded { value in
                     pressed = false
                     let wasDragging = state.dragging == app.id
+                    let point = NSEvent.mouseLocation
                     state.dragging = nil
+                    state.dragStart = nil
                     withAnimation(.spring(duration: 0.3, bounce: 0.15)) { state.dragOffset = .zero }
-                    if wasDragging {
-                        state.onDragOut(app.id, NSEvent.mouseLocation)
+                    if wasDragging, !state.contains(point) {
+                        state.onDragOut(app.id, point)
+                    } else if wasDragging {
+                        if state.reordered { state.onReorder(state.apps.map(\.id)) }
                     } else if hypot(value.translation.width, value.translation.height) <= 5 {
                         launch(app)
                     }
@@ -202,21 +245,19 @@ struct FolderView: View {
 
     var body: some View {
         let apps = state.apps
-        let columns = max(1, min(state.columns, apps.count))
-        let rows = stride(from: 0, to: apps.count, by: columns).map { Array(apps[$0..<min($0 + columns, apps.count)]) }
+        let columns = state.layoutColumns
         VStack(spacing: 14) {
             Text(state.title)
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(Theme.current.folderTitle)
-            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { row, rowApps in
-                    GridRow {
-                        ForEach(rowApps) { app in
-                            AppCell(app: app, row: row, state: state, launch: launch, remove: remove)
-                        }
-                    }
+            // One container for every cell, so a reorder slides cells between rows.
+            LazyVGrid(columns: Array(repeating: GridItem(.fixed(92), spacing: 8, alignment: .leading), count: columns),
+                      alignment: .leading, spacing: 6) {
+                ForEach(Array(apps.enumerated()), id: \.element.id) { index, app in
+                    AppCell(app: app, row: index / columns, state: state, launch: launch, remove: remove)
                 }
             }
+            .frame(width: CGFloat(columns) * 92 + CGFloat(columns - 1) * 8)
         }
         .padding(.horizontal, 18)
         .padding(.top, 16)
@@ -294,6 +335,15 @@ final class FolderController {
             .environment(\.onScreen, true)
         panel.contentView = NSHostingView(rootView: view)
         reload()
+        state.contains = { [weak self] point in
+            self?.panel.frame.insetBy(dx: 20, dy: 20).contains(point) ?? true
+        }
+        state.onReorder = { [weak self] order in
+            guard let self else { return }
+            // Keep apps that are missing from disk (not shown) at the end, rather than dropping them.
+            self.config.apps = order + self.config.apps.filter { !order.contains($0) }
+            self.commit()
+        }
         state.onDragOut = { [weak self] path, point in
             guard let self, !self.panel.frame.insetBy(dx: 20, dy: 20).contains(point) else { return }
             self.config.apps.removeAll { $0 == path }
