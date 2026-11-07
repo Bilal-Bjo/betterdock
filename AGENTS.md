@@ -7,6 +7,7 @@ Native macOS Dock replacement. Apple’s Dock continues running behind it.
 For Bilal’s workspace, native compilation and signing run on the Mac mini:
 
 - `Tests/run-mini.sh` — source sync, cached native build, regression checks, and native integration checks in a temporary GUI LaunchAgent.
+- `Tests/benchmark-mini.sh` — fixed cursor-sweep benchmark with an 8.3 ms p95 frame budget. Capture a baseline before changing performance-sensitive code; do not use UI snapshots as performance proof.
 - `BETTERDOCK_BUILD_HOST=mini ./install.sh --dist` — build and sign a standalone development app on the Mini without installing it.
 - `BETTERDOCK_BUILD_HOST=mini ./install.sh` — build on the Mini, then update this Mac’s developer installation.
 
@@ -15,7 +16,7 @@ Never fall back to a native build on Bilal’s laptop without approval for that 
 ## Boundaries
 
 - `ConfigStore.swift` owns schema validation, atomic saves, recovery, profile folder copies and content migration. Do not bypass it for dock.json writes.
-- `DockModel.swift` owns tile identity and layout. Unavailable apps and unresolved folders remain in persisted layouts.
+- `DockModel.swift` owns tile identity and layout. Unavailable apps and unresolved folders remain in persisted layouts. Static fitting geometry must not be rebuilt per tile/cursor event. Invalidate geometry when config, pinned/running items, widget sizes, display or drag-removal inputs change. Cursor slots also account for Reduce Motion.
 - `DockViews.swift` contains presentation; `main.swift` contains app lifecycle and action coordination.
 - `Controls.swift` owns settings, menu-bar recovery access and keyboard navigation.
 - `AppleDock.restoreBackup` must preserve the original backup on failure. Never change Apple’s Dock preferences in a test.

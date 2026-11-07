@@ -42,12 +42,12 @@ func appEntry(_ path: String) -> FolderApp? {
 // MARK: - Model
 
 final class DockModel: ObservableObject {
-    var config: DockConfig
-    @Published var pinned: [DockEntry] = []
-    @Published var dragID: String?
+    var config: DockConfig { didSet { invalidateLayout() } }
+    @Published var pinned: [DockEntry] = [] { didSet { invalidateLayout() } }
+    @Published var dragID: String? { didSet { if oldValue != dragID { invalidateLayout() } } }
     @Published var dragX: CGFloat = 0
     @Published var dragY: CGFloat = 0
-    @Published var dragOut = false        // dragged up and away: releasing removes the tile
+    @Published var dragOut = false { didSet { if oldValue != dragOut { invalidateLayout() } } }        // dragged up and away: releasing removes the tile
     @Published var dropFolder: String?    // folder the dragged app will drop into
     @Published var poofs: [Poof] = []
     @Published var agents: [String: AgentState] = [:] // app path -> agent status
@@ -58,16 +58,16 @@ final class DockModel: ObservableObject {
     var store: ConfigStore { ConfigStore(path: configPath) }
     let folderDir: String
     let widgetData = WidgetData()
-    var widgetSizes: [WidgetKind: WidgetSize] = [:]
+    var widgetSizes: [WidgetKind: WidgetSize] = [:] { didSet { invalidateLayout() } }
     @Published var running: Set<String> = []
-    @Published var extras: [FolderApp] = []
+    @Published var extras: [FolderApp] = [] { didSet { invalidateLayout() } }
     @Published var mouseX: CGFloat? // screen x while magnifying
     @Published var revealed = true
     @Published var bouncing: Set<String> = []
     @Published var bounceTick: [String: Int] = [:] // each increment plays one launch hop
     @Published var wiggleTick: [String: Int] = [:] // a folder wiggles each time an app is dragged over it
     @Published var pulses: [String: AgentState] = [:] // tiles playing a one-shot agent pulse
-    var screen: NSScreen = screenUnderCursor()
+    var screen: NSScreen = screenUnderCursor() { didSet { invalidateLayout() } }
 
     let padding: CGFloat = 8
     let spacing: CGFloat = 6
@@ -209,48 +209,86 @@ final class DockModel: ObservableObject {
     @Published var fileDropTarget: String?
     /// The Dock window only spans the Dock at full magnification, not the whole screen.
     var originX: CGFloat = 0
-    var windowWidth: CGFloat {
-        let maxScale = min(config.magnifiedSize / config.iconSize, 1 + max(0, screen.frame.width - baseBarRect().width - 20) / max(baseBarRect().width, 1))
-        return min(screen.frame.width, baseBarRect().width * maxScale + 240)
+    /// Geometry depends on layout changes, never cursor movement. Build it once per revision.
+    private struct Geometry {
+        let entries: [DockEntry]
+        let overflow: [DockEntry]
+        let iconSize: CGFloat
+        let widths: [CGFloat]
+        let centers: [CGFloat]
+        let bar: NSRect
+        let scaleLimit: CGFloat
+        let windowWidth: CGFloat
+    }
+    private var cachedGeometry: Geometry?
+    private var cachedSlots: (mouseX: CGFloat?, reducedMotion: Bool, values: [Slot])?
+
+    private func invalidateLayout() {
+        cachedGeometry = nil
+        cachedSlots = nil
     }
 
+    private var geometry: Geometry {
+        if let cachedGeometry { return cachedGeometry }
+        let list = allEntries
+        let all = list + [.trash]
+        let natural = all.reduce(CGFloat(0)) { total, entry in
+            if case .separator = entry { return total + separatorWidth }
+            if case .widget(let kind) = entry { return total + config.iconSize * kind.span(size(of: kind)) }
+            return total + config.iconSize
+        }
+        let available = max(100, screen.frame.width - 40 - spacing * CGFloat(all.count - 1))
+        let iconSize = max(28, min(config.iconSize, config.iconSize * available / max(natural, 1)))
+        let allWidths = all.map { width(of: $0, iconSize: iconSize) }
+        let budget = screen.frame.width - padding * 2 - 24
+        var visible = all
+        var overflow: [DockEntry] = []
+        if span(allWidths) > budget {
+            let reserve = width(of: .overflow, iconSize: iconSize) + width(of: .trash, iconSize: iconSize)
+            var sum: CGFloat = 0
+            var count = 0
+            var included = 0
+            for index in list.indices {
+                let w = allWidths[index]
+                let nextCount = count + (w > 0 ? 1 : 0)
+                if sum + w + reserve + spacing * CGFloat(nextCount + 1) > budget { break }
+                sum += w
+                count = nextCount
+                included += 1
+            }
+            visible = Array(list.prefix(included))
+            overflow = list.dropFirst(included).filter { if case .separator = $0 { return false }; return true }
+            if case .separator? = visible.last { visible.removeLast() }
+            visible += [.overflow, .trash]
+        }
+        let widths = visible.map { width(of: $0, iconSize: iconSize) }
+        let tileSpan = span(widths)
+        var x = screen.frame.midX - tileSpan / 2
+        let centers = widths.map { w -> CGFloat in
+            let center = x + w / 2
+            x += w > 0 ? w + spacing : 0
+            return center
+        }
+        let total = tileSpan + padding * 2
+        let bar = NSRect(x: screen.frame.midX - total / 2, y: screen.frame.minY + bottomMargin,
+                         width: total, height: iconSize + padding * 2)
+        let limit = min(config.magnifiedSize / config.iconSize, 1 + max(0, screen.frame.width - total - 20) / max(total, 1))
+        let result = Geometry(entries: visible, overflow: overflow, iconSize: iconSize, widths: widths,
+                              centers: centers, bar: bar, scaleLimit: limit,
+                              windowWidth: min(screen.frame.width, total * limit + 240))
+        cachedGeometry = result
+        return result
+    }
+
+    var windowWidth: CGFloat { geometry.windowWidth }
     var allEntries: [DockEntry] {
         pinned + (extras.isEmpty ? [] : [.separator("running")]) + extras.map { .app($0) }
     }
-
-    var layoutIconSize: CGFloat {
-        let list = allEntries + [.trash]
-        let natural = list.reduce(CGFloat(0)) { $0 + naturalWidth($1) }
-        let available = max(100, screen.frame.width - 40 - spacing * CGFloat(list.count - 1))
-        return max(28, min(config.iconSize, config.iconSize * available / max(natural, 1)))
-    }
-
-    func naturalWidth(_ entry: DockEntry) -> CGFloat {
-        if case .separator = entry { return separatorWidth }
-        if case .widget(let kind) = entry { return config.iconSize * kind.span(size(of: kind)) }
-        return config.iconSize
-    }
-
-    private func fittedEntries() -> (visible: [DockEntry], hidden: [DockEntry]) {
-        let list = allEntries
-        let available = screen.frame.width - padding * 2 - 24
-        if span((list + [.trash]).map(width)) <= available { return (list + [.trash], []) }
-        var visible: [DockEntry] = []
-        for entry in list {
-            if span((visible + [entry, .overflow, .trash]).map(width)) > available { break }
-            visible.append(entry)
-        }
-        let hidden = Array(list.dropFirst(visible.count)).filter { if case .separator = $0 { return false }; return true }
-        if case .separator? = visible.last { visible.removeLast() }
-        return (visible + [.overflow, .trash], hidden)
-    }
-
-    var entries: [DockEntry] { fittedEntries().visible }
-    var overflowEntries: [DockEntry] { fittedEntries().hidden }
-
-
-    var barHeight: CGFloat { layoutIconSize + padding * 2 }
-    var windowHeight: CGFloat { config.magnifiedSize + padding * 2 + bottomMargin + 34 } // room for the name label
+    var layoutIconSize: CGFloat { geometry.iconSize }
+    var entries: [DockEntry] { geometry.entries }
+    var overflowEntries: [DockEntry] { geometry.overflow }
+    var barHeight: CGFloat { geometry.bar.height }
+    var windowHeight: CGFloat { config.magnifiedSize + padding * 2 + bottomMargin + 34 }
 
     func refreshRunning() {
         let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
@@ -283,59 +321,70 @@ final class DockModel: ObservableObject {
     var presentWidgets: Set<WidgetKind> { Set(pinned.compactMap { if case .widget(let k) = $0 { return k } else { return nil } }) }
     func size(of kind: WidgetKind) -> WidgetSize { widgetSizes[kind] ?? .medium }
 
-    func width(of entry: DockEntry) -> CGFloat {
-        if dragOut && entry.id == dragID { return 0 } // lifted out: the dock closes the gap
+    private func width(of entry: DockEntry, iconSize: CGFloat) -> CGFloat {
+        if dragOut && entry.id == dragID { return 0 }
         if case .separator = entry { return separatorWidth }
         if case .widget(let kind) = entry {
-            let span = kind.span(size(of: kind))
-            return layoutIconSize * span + spacing * max(span - 1, 0)
+            let units = kind.span(size(of: kind))
+            return iconSize * units + spacing * max(units - 1, 0)
         }
-        return layoutIconSize
+        return iconSize
     }
 
-    /// Total width of tiles plus the gaps between visible ones.
+    func width(of entry: DockEntry) -> CGFloat { width(of: entry, iconSize: geometry.iconSize) }
+
     func span(_ widths: [CGFloat]) -> CGFloat {
         widths.reduce(0, +) + spacing * CGFloat(max(widths.filter { $0 > 0 }.count - 1, 0))
     }
 
     func scale(at baseCenter: CGFloat) -> CGFloat {
         guard let mouseX, !Motion.reduce else { return 1 }
-        let sigma = config.iconSize * 1.4
         let d = baseCenter - mouseX
-        let max = min(config.magnifiedSize / config.iconSize, 1 + Swift.max(0, screen.frame.width - baseBarRect().width - 20) / Swift.max(baseBarRect().width, 1))
-        return 1 + (max - 1) * exp(-(d * d) / (2 * sigma * sigma))
+        let sigma = config.iconSize * 1.4
+        return 1 + (geometry.scaleLimit - 1) * exp(-(d * d) / (2 * sigma * sigma))
     }
 
+    /// Hit testing and SwiftUI share the same O(n) cursor layout rather than rebuilding it per tile.
     func slots() -> [Slot] {
-        let list = entries
-        let baseWidths = list.map(width)
-        var x = screen.frame.midX - span(baseWidths) / 2
-        var baseCenters: [CGFloat] = []
-        for w in baseWidths { baseCenters.append(x + w / 2); x += w > 0 ? w + spacing : 0 }
-
-        let scales = zip(list, zip(baseCenters, baseWidths)).map { entry, cw -> CGFloat in
-            if cw.1 == 0 { return 0 }
-            if case .separator = entry { return 1 }
-            if case .widget = entry { return 1 + (scale(at: cw.0) - 1) * 0.35 } // widgets swell gently
-            return scale(at: cw.0)
+        let reducedMotion = Motion.reduce
+        if let cachedSlots, cachedSlots.mouseX == mouseX, cachedSlots.reducedMotion == reducedMotion { return cachedSlots.values }
+        let base = geometry
+        let sigma = config.iconSize * 1.4
+        let denominator = 2 * sigma * sigma
+        var scales: [CGFloat] = []
+        var widths: [CGFloat] = []
+        scales.reserveCapacity(base.entries.count)
+        widths.reserveCapacity(base.entries.count)
+        for index in base.entries.indices {
+            let entry = base.entries[index]
+            var scale: CGFloat = 1
+            if base.widths[index] == 0 { scale = 0 }
+            else if let mouseX, !reducedMotion {
+                let distance = base.centers[index] - mouseX
+                let swell = (base.scaleLimit - 1) * exp(-(distance * distance) / denominator)
+                switch entry {
+                case .separator: break
+                case .widget: scale += swell * 0.35
+                default: scale += swell
+                }
+            }
+            scales.append(scale)
+            widths.append(base.widths[index] * scale)
         }
-        let widths = zip(baseWidths, scales).map { $0 * $1 }
         var cursor = screen.frame.midX - span(widths) / 2
         var result: [Slot] = []
-        for (i, entry) in list.enumerated() {
-            let w = widths[i]
-            let height: CGFloat = { if case .separator = entry { return separatorWidth } else { return layoutIconSize * scales[i] } }()
+        result.reserveCapacity(base.entries.count)
+        for index in base.entries.indices {
+            let entry = base.entries[index]
+            let w = widths[index]
+            let height: CGFloat
+            if case .separator = entry { height = separatorWidth } else { height = base.iconSize * scales[index] }
             result.append(Slot(entry: entry, centerX: cursor + w / 2, size: height, width: w))
             cursor += w > 0 ? w + spacing : 0
         }
+        cachedSlots = (mouseX, reducedMotion, result)
         return result
     }
 
-    /// Screen rect of the glass bar at rest (used for hit-testing the cursor).
-    func baseBarRect() -> NSRect {
-        let list = entries
-        let total = span(list.map(width)) + padding * 2
-        return NSRect(x: screen.frame.midX - total / 2, y: screen.frame.minY + bottomMargin, width: total, height: barHeight)
-    }
+    func baseBarRect() -> NSRect { geometry.bar }
 }
-

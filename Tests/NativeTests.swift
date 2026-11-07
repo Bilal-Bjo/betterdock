@@ -66,6 +66,39 @@ enum NativeTests {
             let crowded = DockModel(config: try store.recover(), folderDir: store.folderDir)
             expect(!crowded.overflowEntries.isEmpty, "crowded Dock exposes overflow")
             expect(crowded.baseBarRect().width <= crowded.screen.frame.width, "crowded Dock fits the display")
+            let layout = DockModel(config: initial, folderDir: store.folderDir)
+            let appA = appEntry("/Benchmark/A.app")!, appB = appEntry("/Benchmark/B.app")!
+            layout.extras = []
+            layout.pinned = [.app(appA), .widget(.storage), .app(appB)]
+            let rest = layout.slots()
+            layout.mouseX = rest[0].centerX
+            let zoom = layout.slots()
+            expect(Motion.reduce ? zoom[0].size == rest[0].size : zoom[0].size > rest[0].size, "cursor movement still magnifies the hovered icon")
+            expect(zip(zoom, layout.slots()).allSatisfy { $0.centerX == $1.centerX && $0.size == $1.size }, "hit testing and drawing agree for the same cursor position")
+            layout.mouseX = nil
+            let medium = layout.slots()[1].width
+            layout.widgetSizes[.storage] = .large
+            expect(layout.slots()[1].width > medium, "widget resize immediately updates fitted geometry")
+            layout.pinned.swapAt(0, 2)
+            expect(layout.slots()[0].entry.id == appB.id, "reorder immediately updates tile geometry")
+            layout.config.iconSize = 44
+            layout.config.magnifiedSize = 71
+            expect(layout.slots()[0].size == 44, "appearance size change immediately updates geometry")
+            layout.dragID = appB.id
+            layout.dragOut = true
+            expect(layout.slots()[0].width == 0, "dragging out closes the tile gap")
+            layout.dragOut = false
+            layout.dragID = nil
+            expect(layout.slots()[0].width > 0, "cancelled removal restores the tile gap")
+            let extra = appEntry("/Benchmark/Running.app")!
+            layout.extras = [extra]
+            expect(layout.slots().contains { $0.entry.id == extra.id }, "new running app immediately appears")
+            layout.extras = []
+            expect(!layout.slots().contains { $0.entry.id == extra.id }, "quit app immediately leaves running section")
+            layout.screen = NSScreen.screens.last!
+            let changedDisplay = layout.slots()
+            let midpoint = ((changedDisplay.first!.centerX - changedDisplay.first!.width / 2) + (changedDisplay.last!.centerX + changedDisplay.last!.width / 2)) / 2
+            expect(abs(midpoint - layout.screen.frame.midX) < 0.01, "layout remains centered after changing displays")
             let widget = WidgetData()
             var finished = 0
             widget.onTimerFinished = { finished += 1 }

@@ -97,7 +97,7 @@ The Dock follows you to whichever screen you push the cursor to the bottom of, l
 
 BetterDock uses native Swift and SwiftUI. Core builds have no third-party dependencies; release builds bundle Sparkle for updates. Widget data polling stops while the Dock is hidden. Badge checks slow down, and minute-scale recovery/profile/agent housekeeping continues in the background. Looping agent-dot animations use Core Animation.
 
-The `--bench` diagnostic reports frame timing on the Mac running it. CPU usage varies with the layout, widgets, agent updates and hardware; a hidden Dock is designed to do very little work, not literally no work.
+The `--bench` diagnostic reports frame timing on the Mac running it. Static fitting/overflow geometry is cached until a layout, size, display or drag-removal change; drawing and hit testing share a single cursor layout. In the fixed 24-app + Storage-widget Mini benchmark, this reduced median frame time from 11.48 ms to 2.17 ms and p95 from 12.07 ms to 2.73 ms. `Tests/benchmark-mini.sh` enforces an 8.3 ms p95 frame budget for that fixture. CPU usage varies with the layout, widgets, agent updates and hardware; a hidden Dock is designed to do very little work, not literally no work.
 
 ## Requirements
 
@@ -302,6 +302,7 @@ Icon styles use IconServices, a private macOS framework, to draw the dark and mo
 
 ```bash
 Tests/run-mini.sh
+Tests/benchmark-mini.sh  # cursor-sweep performance check on the Mini
 ```
 
 This syncs sources to the Mac mini, compiles on its external SSD, and runs native regression and integration checks in an isolated GUI session. It never changes the real Dock configuration. GUI fixtures and the small executable stage temporarily under `/tmp` because the Mini's GUI launchd session cannot access removable storage; staging is removed afterwards.
