@@ -22,7 +22,7 @@ if [[ "$mode" != "--dist" && ! -f config/dock.json ]]; then
 fi
 
 rm -rf "$app" && mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-swiftc -O -target arm64-apple-macos14.0 -o "$app/Contents/MacOS/$name" Sources/Shared/*.swift Sources/DockApp/*.swift
+./release/compile-development.sh "$app/Contents/MacOS/$name"
 # A standalone app seeds ~/Library/Application Support/BetterDock from these on first launch.
 cp -R examples "$app/Contents/Resources/examples"
 
@@ -38,19 +38,21 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>$label</string>
   <key>CFBundleExecutable</key><string>$name</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>0.2.0</string>
+  <key>CFBundleVersion</key><string>0.2.0</string>
+  <key>BDSourceDigest</key><string>$(python3 Tests/candidate-digest.py)</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSCalendarsFullAccessUsageDescription</key><string>Shows your next event in the Calendar widget.</string>
   <key>NSAppleEventsUsageDescription</key><string>Shows and controls what Spotify or Music is playing in the Now Playing widget.</string>
   $configKey
+  <key>BDPreview</key><$([[ "$mode" == "--try" ]] && echo true || echo false)/>
 </dict></plist>
 PLIST
 
-# Signing with a stable identity lets macOS remember the Accessibility permission across rebuilds.
-identity=$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development/ {print $2; exit}')
-codesign --force --sign "${identity:--}" "$app" >/dev/null
+# BETTERDOCK_BUILD_HOST=mini routes compilation and GUI-session signing to the Mini.
+./release/sign-development.sh "$app"
 
 if [[ "$mode" == "--dist" ]]; then
   echo "Built $app. Sign it with your Developer ID, notarize it, and ship it in a DMG; it sets itself up on first launch."
@@ -62,6 +64,7 @@ if [[ "$mode" == "--try" ]] && launchctl print "gui/$(id -u)/$label" >/dev/null 
   exit 1
 fi
 
+if [[ "$mode" != "--try" ]]; then launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true; fi
 pkill -x "$name" 2>/dev/null || true
 
 if [[ "$mode" == "--try" ]]; then
@@ -72,6 +75,7 @@ fi
 
 rm -rf "$dest" && cp -R "$app" "$dest"
 
+mkdir -p "$HOME/Library/LaunchAgents"
 agent="$HOME/Library/LaunchAgents/$label.plist"
 cat > "$agent" <<AGENT
 <?xml version="1.0" encoding="UTF-8"?>
@@ -80,7 +84,7 @@ cat > "$agent" <<AGENT
   <key>Label</key><string>$label</string>
   <key>ProgramArguments</key><array><string>$dest/Contents/MacOS/$name</string></array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ProcessType</key><string>Interactive</string>
 </dict></plist>
 AGENT

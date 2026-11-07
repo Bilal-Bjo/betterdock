@@ -5,12 +5,13 @@ import SwiftUI
 // MARK: - Agent status
 
 enum AgentState: Int, Comparable {
-    case done = 1, working = 2, attention = 3
+    case stale = 0, done = 1, working = 2, attention = 3
 
     static func < (a: AgentState, b: AgentState) -> Bool { a.rawValue < b.rawValue }
 
     var color: Color {
         switch self {
+        case .stale: return .gray
         case .working: return Color(red: 1.0, green: 0.66, blue: 0.16)
         case .done: return Color(red: 0.2, green: 0.82, blue: 0.4)
         case .attention: return Color(red: 1.0, green: 0.27, blue: 0.23)
@@ -19,6 +20,7 @@ enum AgentState: Int, Comparable {
 
     var label: String {
         switch self {
+        case .stale: return "Agent status is stale"
         case .working: return "Agent working"
         case .done: return "Agent finished"
         case .attention: return "Agent needs you"

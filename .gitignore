@@ -2,3 +2,5 @@ build/
 config/
 .DS_Store
 .claude/
+
+__pycache__/

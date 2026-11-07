@@ -9,6 +9,10 @@ struct FolderConfig: Codable {
     var apps: [String]
     var labels: [String: String]?
     var color: String?
+    var isValid: Bool {
+        (1...8).contains(columns) && Set(apps).count == apps.count
+            && apps.allSatisfy { $0.hasPrefix("/") && $0.hasSuffix(".app") }
+    }
 }
 
 /// Folder tile colours: graphite by default, or one of six tints.
@@ -42,19 +46,34 @@ struct FolderApp: Identifiable {
 }
 
 func loadConfig(_ path: String) -> FolderConfig? {
-    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
-    return try? JSONDecoder().decode(FolderConfig.self, from: data)
+    func read(_ file: String) -> (Data, FolderConfig)? {
+        guard let data = FileManager.default.contents(atPath: file),
+              let config = try? JSONDecoder().decode(FolderConfig.self, from: data), config.isValid else { return nil }
+        return (data, config)
+    }
+    if let (_, config) = read(path) { return config }
+    if let (data, config) = read(path + ".last-good") {
+        try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        return config
+    }
+    return nil
 }
 
-func saveConfig(_ config: FolderConfig, to path: String) {
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-    if let data = try? encoder.encode(config) { try? data.write(to: URL(fileURLWithPath: path)) }
+@discardableResult func saveConfig(_ config: FolderConfig, to path: String) -> Bool {
+    do {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        let data = try encoder.encode(config)
+        if let previous = try? Data(contentsOf: URL(fileURLWithPath: path)) {
+            try previous.write(to: URL(fileURLWithPath: path + ".last-good"), options: .atomic)
+        }
+        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        return true
+    } catch { AppNotice.report(error); return false }
 }
 
 func resolveApps(_ config: FolderConfig) -> [FolderApp] {
     config.apps.compactMap { path in
-        guard FileManager.default.fileExists(atPath: path) else { return nil }
         let url = URL(fileURLWithPath: path)
         let name = config.labels?[path]
             ?? FileManager.default.displayName(atPath: path).replacingOccurrences(of: ".app", with: "")
@@ -83,6 +102,9 @@ final class FolderState: ObservableObject {
     @Published var running: Set<String> = []
     @Published var agents: [String: AgentState] = [:]
     @Published var badges: [String: String] = [:]
+    @Published var search = ""
+    @Published var focusedIndex = 0
+    var filteredApps: [FolderApp] { search.isEmpty ? apps : apps.filter { $0.name.localizedCaseInsensitiveContains(search) } }
     @Published var dragging: String?
     @Published var dragOffset: CGSize = .zero
     var anchorX: CGFloat = 0.5
@@ -98,7 +120,9 @@ final class FolderState: ObservableObject {
 
     /// Cells are 92×100 with 8/6 pt gaps.
     static let step = CGSize(width: 100, height: 106)
-    var layoutColumns: Int { max(1, min(columns, apps.count)) }
+    @Published var availableHeight: CGFloat = max(106, (NSScreen.main?.visibleFrame.height ?? 768) - 220)
+    @Published var availableColumns = max(1, Int(((NSScreen.main?.visibleFrame.width ?? 1024) - 84) / 100))
+    var layoutColumns: Int { max(1, min(columns, apps.count, availableColumns)) }
 
     /// Moves the dragged app to the slot under the cursor, so the others slide aside, and returns
     /// the offset that keeps it under the cursor from its new slot.
@@ -165,6 +189,7 @@ struct AppCell: View {
                 .frame(width: 84)
         }
         .frame(width: 92, height: 100)
+        .background(state.filteredApps.indices.contains(state.focusedIndex) && state.filteredApps[state.focusedIndex].id == app.id ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 10))
         .contentShape(Rectangle())
         .opacity(state.open ? 1 : 0)
         .offset(y: state.open || Motion.reduce ? 0 : 6)
@@ -182,7 +207,7 @@ struct AppCell: View {
         .gesture(
             DragGesture(minimumDistance: 0, coordinateSpace: .global)
                 .onChanged { value in
-                    if hypot(value.translation.width, value.translation.height) > 5 || state.dragging == app.id {
+                    if state.search.isEmpty && (hypot(value.translation.width, value.translation.height) > 5 || state.dragging == app.id) {
                         pressed = false
                         state.dragging = app.id
                         state.dragOffset = state.drag(app.id, by: value.translation, at: NSEvent.mouseLocation)
@@ -213,6 +238,10 @@ struct AppCell: View {
                 Button("Remove from Folder") { remove(app) }
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(app.name)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { launch(app) }
         .tooltip(app.name)
     }
 }
@@ -244,12 +273,15 @@ struct FolderView: View {
     let remove: ((FolderApp) -> Void)?
 
     var body: some View {
-        let apps = state.apps
+        let apps = state.filteredApps
         let columns = state.layoutColumns
         VStack(spacing: 14) {
             Text(state.title)
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(Theme.current.folderTitle)
+            TextField("Find an app…", text: $state.search).textFieldStyle(.roundedBorder)
+                .accessibilityLabel("Search folder apps")
+            ScrollView {
             // One container for every cell, so a reorder slides cells between rows.
             LazyVGrid(columns: Array(repeating: GridItem(.fixed(92), spacing: 8, alignment: .leading), count: columns),
                       alignment: .leading, spacing: 6) {
@@ -258,6 +290,9 @@ struct FolderView: View {
                 }
             }
             .frame(width: CGFloat(columns) * 92 + CGFloat(columns - 1) * 8)
+            if apps.isEmpty { Text(state.search.isEmpty ? "This folder is empty" : "No matching apps").foregroundStyle(.secondary).padding() }
+            }
+            .frame(width: CGFloat(columns) * 100 - 8, height: min(CGFloat(max(1, (apps.count + columns - 1) / columns)) * 106, state.availableHeight))
         }
         .padding(.horizontal, 18)
         .padding(.top, 16)
@@ -309,19 +344,21 @@ final class FolderController {
     var onClose: () -> Void = {}
     var onChange: () -> Void = {}
     /// Set by the dock: "Remove from Folder" hands the app back to it.
-    var onRemoveApp: ((String) -> Void)?
+    var onRemoveApp: ((String) -> Bool)?
     private var clickMonitor: Any?
     private var keyMonitor: Any?
     private var closing = false
+    private var savedConfig: FolderConfig
 
     var apps: [FolderApp] { state.apps }
     var isOpen: Bool { panel.isVisible && !closing }
 
     /// Set by the dock: an app dragged out of the folder lands at this screen point.
-    var onDragOutApp: ((String, NSPoint) -> Void)?
+    var onDragOutApp: ((String, NSPoint) -> Bool)?
 
     init(config: FolderConfig, path: String? = nil) {
         self.config = config
+        self.savedConfig = config
         self.path = path
         panel = FolderPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isOpaque = false
@@ -346,10 +383,10 @@ final class FolderController {
         }
         state.onDragOut = { [weak self] path, point in
             guard let self, !self.panel.frame.insetBy(dx: 20, dy: 20).contains(point) else { return }
+            guard self.onDragOutApp?(path, point) == true else { return }
             self.config.apps.removeAll { $0 == path }
-            self.commit()
+            guard self.commit() else { return }
             self.hide()
-            self.onDragOutApp?(path, point)
         }
     }
 
@@ -360,22 +397,24 @@ final class FolderController {
         if let host = panel.contentView { panel.setContentSize(host.fittingSize) }
     }
 
-    private func commit() {
-        if let path { saveConfig(config, to: path) }
+    @discardableResult private func commit() -> Bool {
+        if let path, !saveConfig(config, to: path) { config = savedConfig; reload(); return false }
+        savedConfig = config
         reload()
         onChange()
+        return true
     }
 
-    func add(_ appPath: String) {
-        guard !config.apps.contains(appPath) else { return }
+    @discardableResult func add(_ appPath: String) -> Bool {
+        guard !config.apps.contains(appPath) else { return true }
         config.apps.append(appPath)
-        commit()
+        return commit()
     }
 
     func removeFromFolder(_ appPath: String) {
+        guard onRemoveApp?(appPath) == true else { return }
         config.apps.removeAll { $0 == appPath }
-        commit()
-        onRemoveApp?(appPath)
+        guard commit() else { return }
         if config.apps.isEmpty { hide() }
     }
 
@@ -392,11 +431,16 @@ final class FolderController {
     /// Opens the folder growing out of `anchor` (screen point at the top-centre of the trigger).
     func show(anchor: NSPoint) {
         closing = false
+        state.search = ""
+        state.focusedIndex = 0
         let screen = NSScreen.screens.first { NSMouseInRect(anchor, $0.frame, false) } ?? NSScreen.main!
+        state.availableHeight = max(106, screen.visibleFrame.maxY - anchor.y - 100)
+        state.availableColumns = max(1, Int((screen.visibleFrame.width - 84) / 100))
+        if let host = panel.contentView { host.layoutSubtreeIfNeeded(); panel.setContentSize(host.fittingSize) }
         let size = panel.frame.size
         var x = anchor.x - size.width / 2
         x = min(max(x, screen.frame.minX + 8), screen.frame.maxX - size.width - 8)
-        panel.setFrameOrigin(NSPoint(x: x, y: anchor.y - 24)) // 24pt shadow inset in FolderView
+        panel.setFrameOrigin(NSPoint(x: max(screen.frame.minX, x), y: min(anchor.y - 24, screen.visibleFrame.maxY - size.height))) // 24pt shadow inset in FolderView
 
         panel.appearance = Theme.current.appearance
         state.running = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.path })
@@ -427,6 +471,9 @@ final class FolderController {
     }
 
     func launch(_ app: FolderApp) {
+        guard FileManager.default.fileExists(atPath: app.id) else {
+            AppNotice.report(ConfigStore.Failure("\(app.name) is currently unavailable. Its folder entry has been kept.")); return
+        }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         NSWorkspace.shared.openApplication(at: app.url, configuration: configuration)
@@ -439,7 +486,18 @@ final class FolderController {
             self?.hide()
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 { self?.hide(); return nil } // Esc
+            guard let self, event.window === self.panel else { return event }
+            if event.keyCode == 53 { self.hide(); return nil }
+            let apps = self.state.filteredApps
+            if [123, 124, 125, 126].contains(event.keyCode), !apps.isEmpty {
+                let delta = event.keyCode == 123 ? -1 : event.keyCode == 124 ? 1 : event.keyCode == 125 ? self.state.layoutColumns : -self.state.layoutColumns
+                self.state.focusedIndex = min(max(0, self.state.focusedIndex + delta), apps.count - 1)
+                return nil
+            }
+            if event.keyCode == 36, !apps.isEmpty {
+                self.launch(apps[min(self.state.focusedIndex, apps.count - 1)])
+                return nil
+            }
             return event
         }
     }

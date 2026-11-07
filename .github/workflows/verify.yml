@@ -1,0 +1,27 @@
+name: Verify
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y zsh
+      - name: Validate scripts and example JSON
+        run: |
+          for script in install.sh uninstall.sh hooks/*.sh release/*.sh Tests/*.sh; do zsh -n "$script"; done
+          python3 -m py_compile release/source-digest.py
+          python3 -c 'import json,pathlib; [json.loads(p.read_text()) for p in pathlib.Path("examples").rglob("*.json")]'
+          python3 release/source-digest.py
+  # Native validation runs on the owner's Mac mini, with build/cache/temp on its SSD.
+  # Opt-in until that machine is registered as a self-hosted runner.
+  native:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, macOS, ARM64, betterdock-mini]
+    steps:
+      - uses: actions/checkout@v4
+      - run: zsh Tests/verify-on-mini.sh

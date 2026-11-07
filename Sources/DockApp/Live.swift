@@ -8,11 +8,15 @@ import SwiftUI
 /// Watches ~/Library/Application Support/BetterDock/agents for status files written by
 /// hooks/agent-status.sh and maps them to the app hosting each agent (Claude, cmux, Terminal…).
 final class AgentWatcher {
-    static let directory = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/BetterDock/agents")
+    static var directory: URL {
+        if AppSetup.isPreview { return URL(fileURLWithPath: AppSetup.configDir).appendingPathComponent("agents") }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/BetterDock/agents")
+    }
 
     var onChange: ([String: AgentState]) -> Void = { _ in }
     private var source: DispatchSourceFileSystemObject?
+    private var expiryTimer: Timer?
+    var now: () -> Date = Date.init
     private var appPaths: [String: String] = [:] // bundle id -> app path
 
     struct Status: Decodable {
@@ -30,6 +34,8 @@ final class AgentWatcher {
         source.setCancelHandler { close(fd) }
         source.resume()
         self.source = source
+        expiryTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.reload() }
+        expiryTimer?.tolerance = 10
         reload()
     }
 
@@ -50,15 +56,16 @@ final class AgentWatcher {
 
     func reload() {
         var result: [String: AgentState] = [:]
-        let now = Date().timeIntervalSince1970
+        let now = now().timeIntervalSince1970
         for (url, status) in files() {
             if now - status.updated > 12 * 3600 { try? FileManager.default.removeItem(at: url); continue } // stale session
             guard let path = appPath(for: status.bundle) else { continue }
             let state: AgentState
             switch status.state {
-            case "working": state = .working
+            case "working": state = now - status.updated > 30 * 60 ? .stale : .working
             case "attention": state = .attention
-            default: state = .done
+            case "done": state = .done
+            default: state = .stale
             }
             result[path] = max(result[path] ?? state, state)
         }
@@ -112,7 +119,8 @@ final class BadgeReader {
             for tile in (attribute(list, kAXChildrenAttribute) as? [AXUIElement]) ?? [] {
                 guard let label = attribute(tile, "AXStatusLabel") as? String, !label.isEmpty,
                       let url = attribute(tile, kAXURLAttribute) else { continue }
-                let path = (url as! URL).path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                guard let tileURL = url as? URL else { continue }
+                let path = tileURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
                 badges["/" + path] = label
             }
         }
@@ -274,10 +282,11 @@ extension DockController {
     /// Picking a sound plays it, so the menu doubles as a preview.
     func soundMenu(for event: AgentEvent) -> DockMenuItem {
         let current = soundChoice(for: event)
-        let pick = { (choice: String) -> DockMenuItem in
-            DockMenuItem(title: (choice as NSString).deletingPathExtension, checked: choice == current,
-                         action: { [weak self] in self?.setSound(choice, for: event) },
-                         preview: { SoundLibrary.preview(choice) })
+        let pick = { [self] (choice: String) -> DockMenuItem in
+            var item = DockMenuItem(title: (choice as NSString).deletingPathExtension, checked: choice == current,
+                                    action: { [weak self] in self?.setSound(choice, for: event) })
+            item.preview = { SoundLibrary.preview(choice) }
+            return item
         }
         var items = SoundLibrary.systemSounds.map(pick)
         let custom = SoundLibrary.customSounds
@@ -298,7 +307,7 @@ extension DockController {
     /// tile the next time the Dock shows. Runs only when agent files change.
     func announce(from old: [String: AgentState], to new: [String: AgentState]) {
         guard agentsLoaded, !model.revealed else { return }
-        let arrived = new.filter { path, state in state != .working && old[path] != state }
+        let arrived = new.filter { path, state in (state == .done || state == .attention) && old[path] != state }
         guard let loudest = arrived.values.max() else { return }
         if agentSound.plays(loudest) { SoundLibrary.play(soundChoice(for: loudest == .attention ? .attention : .done)) }
         for (path, state) in arrived { pendingPulses[path] = max(pendingPulses[path] ?? state, state) }

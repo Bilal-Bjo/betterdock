@@ -95,13 +95,9 @@ The Dock follows you to whichever screen you push the cursor to the bottom of, l
 
 ## Performance
 
-BetterDock is native Swift and SwiftUI with no dependencies. Looping animations run in the system's render server, polling stops while the Dock is hidden, and nothing runs while your cursor is away from the bottom of the screen.
+BetterDock uses native Swift and SwiftUI. Core builds have no third-party dependencies; release builds bundle Sparkle for updates. Widget data polling stops while the Dock is hidden. Badge checks slow down, and minute-scale recovery/profile/agent housekeeping continues in the background. Looping agent-dot animations use Core Animation.
 
-| | CPU |
-|---|---|
-| Hidden | **0.0%** |
-| On screen, with widgets and a glowing agent dot | **~0.1%** |
-| Rendering one frame while magnifying | **~2 ms** |
+The `--bench` diagnostic reports frame timing on the Mac running it. CPU usage varies with the layout, widgets, agent updates and hardware; a hidden Dock is designed to do very little work, not literally no work.
 
 ## Requirements
 
@@ -179,7 +175,23 @@ The **AI Usage** widget shows this week's limits. Codex usage is read from its l
 
 ## Configure
 
-Right-click any icon and open **BetterDock** for Profile, Theme, Icon Style, Icon Tint, Icon Size, Magnification, Hide Automatically, Widgets, Agent Sounds, Hide Apple's Dock, Open at Login, Setup…, **Edit Settings…** and **Show Settings in Finder**. Right-click a widget to resize it, a folder to rename or colour it.
+Open **Settings…** from the BetterDock menu-bar icon, right-click an icon → **BetterDock**, or press **Cmd+,** while BetterDock is focused. The settings window provides appearance, widgets, weather city, profiles, and settings export/import.
+
+**Control–Option–Space** reveals and focuses the Dock. Use Left/Right and Return to open an item; Escape dismisses keyboard mode. Folders have search and arrow/Return navigation. Large layouts shrink to fit, with remaining items reachable through **More apps**; folder contents scroll.
+
+Right-click a widget to resize it, a folder to rename or colour it. Other advanced controls remain in the BetterDock context menu.
+
+Settings are validated before application, written atomically, and backed up alongside `dock.json`. An invalid external edit is archived and the last working configuration is restored while the Dock stays running. `dock.json.previous` keeps the prior saved generation; `dock.json.last-good` is used for recovery. Unavailable apps retain their pins.
+
+Profiles own independent folder copies. Existing shared folders are separated on migration; deleting a folder cannot delete another profile's folder. A focus timer finishes even with the Dock hidden and shows a local completion banner. Agent sessions without updates for 30 minutes show a gray stale indicator, then expire after 12 hours.
+
+If the app cannot start and Apple's Dock remains hidden, run:
+
+```bash
+~/Applications/BetterDock.app/Contents/MacOS/BetterDock --restore-apple-dock
+```
+
+Restoration checks the import result and keeps the original backup on failure. Preview mode never changes Apple Dock or login preferences.
 
 Everything is plain JSON in `~/Library/Application Support/BetterDock/` (`config/` in the repo for a developer install), copied from `examples/` on first launch. Save `dock.json` in any editor and the Dock reloads.
 
@@ -266,9 +278,15 @@ Sources/
   Shared/Status.swift          agent dots, pulses, badges
   Shared/IconStyle.swift       dark, clear and tinted icons
   Shared/SystemIcons.swift     the icon variants macOS renders (IconServices)
-  DockApp/main.swift           the Dock: layout, magnification, drag and drop, menus
+  DockApp/Configuration.swift  typed configuration schema
+  DockApp/ConfigStore.swift    validation, atomic saves, recovery and folder isolation
+  DockApp/DockModel.swift      tile identity, fitting, overflow and layout
+  DockApp/DockViews.swift      Dock presentation and accessible tile actions
+  DockApp/Controls.swift       settings, keyboard controls and menu-bar recovery
+  DockApp/main.swift           lifecycle, drag and drop and action coordination
   DockApp/Live.swift           agent status, unread badges, poof effect
-  DockApp/Widgets.swift        widgets and their data sources
+  DockApp/Widgets.swift        widget presentation
+  DockApp/WidgetData.swift     widget data sources and focus timer completion
   DockApp/Setup.swift          settings folder, login item, hiding and restoring Apple's Dock
   DockApp/Onboarding.swift     first-run setup
   DockApp/Profiles.swift       profiles and their switching rules
@@ -279,6 +297,20 @@ release/, packaging/           signed release builds (see RELEASING.md)
 ```
 
 Icon styles use IconServices, a private macOS framework, to draw the dark and monochrome icons Apple designs for each app. If a macOS update changes it, BetterDock falls back to its own renderer.
+
+## Verification
+
+```bash
+Tests/run-mini.sh
+```
+
+This syncs sources to the Mac mini, compiles on its external SSD, and runs native regression and integration checks in an isolated GUI session. It never changes the real Dock configuration. GUI fixtures and the small executable stage temporarily under `/tmp` because the Mini's GUI launchd session cannot access removable storage; staging is removed afterwards.
+
+For this developer setup, `BETTERDOCK_BUILD_HOST=mini ./install.sh` also routes compilation and signing to the Mini. Without that variable, manual source installations build on the current Mac. Bilal's agents must use the Mini path (see `AGENTS.md`).
+
+GitHub Actions checks scripts and example JSON on pushes/PRs. Native CI is manually dispatched on a self-hosted runner labeled `betterdock-mini`; that runner must be registered separately. Native method-level integration checks complement a real GUI walkthrough; neither proves long-term stability or every monitor/permission combination.
+
+Release builds record a source-content digest. Publishing refuses artifacts built from different sources.
 
 ## License
 
