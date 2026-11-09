@@ -86,7 +86,11 @@ Tell them, briefly:
 - Right-click any icon → **BetterDock** for themes, icon styles, widgets, icon size, magnification and auto-hide.
 - Right-click an app → **New Folder with …**. Drag apps onto a folder to add them, and out of an open folder to remove them.
 - Drag a running app from the right of the separator into the Dock to keep it.
-- Settings are plain JSON in `~/betterdock/config/dock.json`; saving it reloads the Dock.
+- Open **Settings…** from the menu-bar icon or press **Cmd+,** while BetterDock is focused. Settings are also JSON in `~/betterdock/config/dock.json`; valid edits apply live, and invalid edits recover from backup.
+
+### Verification in Bilal's workspace
+
+Native builds and signing must run on his Mac mini. Use `BETTERDOCK_BUILD_HOST=mini ./install.sh` (and the same variable with `--try` or `--dist`). Run `Tests/run-mini.sh` for native regression/integration checks; inspect the actual GUI separately. Never fall back to building on his laptop without approval for that run.
 
 ### Updating
 

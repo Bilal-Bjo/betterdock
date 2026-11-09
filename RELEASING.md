@@ -37,6 +37,7 @@ release/make-appcast.sh X.Y.Z             # adds X.Y.Z to the published appcast,
 release/publish.sh X.Y.Z [--tap]          # GitHub release vX.Y.Z with the DMG + appcast.xml, then the Homebrew cask
 ```
 
+- Every build stores `source.sha256`. Publishing recomputes the shipped-source digest and refuses a mismatch, so an older artifact cannot be tagged as a newer source candidate.
 - Versions only go up: Sparkle compares `CFBundleVersion`, and `publish.sh` refuses to replace an
   existing release.
 - The feed lives at `https://github.com/Bilal-Bjo/betterdock/releases/latest/download/appcast.xml`, so

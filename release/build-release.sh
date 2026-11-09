@@ -35,6 +35,8 @@ build="$MINI_ROOT/build/$version"
 rm -rf "$out" "$build"
 mkdir -p "$out" "$build"
 
+python3 "$REPO_ROOT/release/source-digest.py" > "$out/source.sha256"
+
 step "Sparkle $SPARKLE_VERSION"
 sparkle_dir=$("$REPO_ROOT/release/fetch-sparkle.sh")
 print "$sparkle_dir"

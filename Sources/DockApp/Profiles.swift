@@ -33,9 +33,17 @@ struct ProfileRule: Codable {
         return true
     }
 
+    var valid: Bool {
+        let allowed = Set(["mon", "tue", "wed", "thu", "fri", "sat", "sun", "weekdays", "weekends"])
+        return !profile.isEmpty && (days ?? []).allSatisfy { allowed.contains($0.lowercased()) }
+            && ((from == nil && to == nil) || (minutes(from) != nil && minutes(to) != nil))
+    }
+
     private func minutes(_ time: String?) -> Int? {
-        guard let parts = time?.split(separator: ":"), let hour = Int(parts.first ?? "") else { return nil }
-        return hour * 60 + (parts.count > 1 ? Int(parts[1]) ?? 0 : 0)
+        guard let parts = time?.split(separator: ":"), parts.count == 2,
+              let hour = Int(parts[0]), let minute = Int(parts[1]),
+              (0...23).contains(hour), (0...59).contains(minute) else { return nil }
+        return hour * 60 + minute
     }
 }
 
@@ -126,7 +134,7 @@ extension DockController {
         guard name != currentProfile else { return }
         let layout = model.items
         var next: [[String: String]] = layout
-        model.updateConfig { json in
+        guard model.updateConfig({ json in
             var saved = json["profiles"] as? [String: Any] ?? [:]
             saved[currentProfile ?? "Default"] = layout
             next = saved[name] as? [[String: String]] ?? layout
@@ -134,7 +142,7 @@ extension DockController {
             json["profiles"] = saved
             json["profile"] = name
             json["items"] = next
-        }
+        }) else { return }
         currentProfile = name
         let items = next.map { DockConfig.Item(app: $0["app"], folder: $0["folder"], widget: $0["widget"], size: $0["size"]) }
         for folder in folders() where folder.isOpen { folder.hide() }
@@ -161,14 +169,21 @@ extension DockController {
         let chosen = field.stringValue.trimmingCharacters(in: .whitespaces)
         guard !chosen.isEmpty, savedProfiles[chosen] == nil else { return }
         let layout = model.items
-        model.updateConfig { json in
+        let isolated: [[String: String]]
+        do { isolated = try model.store.cloneLayout(layout) }
+        catch { AppNotice.report(error); return }
+        guard model.updateConfig({ json in
             var saved = json["profiles"] as? [String: Any] ?? [:]
             saved[currentProfile ?? "Default"] = layout
-            saved[chosen] = layout
+            saved[chosen] = isolated
             json["profiles"] = saved
             json["profile"] = chosen
-        }
+            json["items"] = isolated
+        }) else { return }
         currentProfile = chosen
+        model.pinned = model.entries(for: isolated.map { DockConfig.Item(app: $0["app"], folder: $0["folder"], widget: $0["widget"], size: $0["size"]) })
+        for case .folder(let id, let folder) in model.pinned { wire(folder, id: id) }
+        model.refreshRunning()
     }
 
     func deleteProfile(_ name: String) {

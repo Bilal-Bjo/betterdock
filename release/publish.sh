@@ -51,6 +51,8 @@ fi
 # On the Mini.
 export TMPDIR="$MINI_ROOT/tmp"; mkdir -p "$TMPDIR"
 step "Preflight"
+[[ -f "$out/source.sha256" ]] || die "Missing build provenance. Rebuild this version."
+[[ $(python3 "$REPO_ROOT/release/source-digest.py") == $(cat "$out/source.sha256") ]] || die "Source differs from the built release. Rebuild before publishing."
 [[ -f "$dmg" ]] || die "$dmg not found. Run release/build-release.sh $version first."
 [[ -f "$out/appcast.xml" ]] || die "$out/appcast.xml not found. Run release/make-appcast.sh $version first."
 xcrun stapler validate -q "$dmg" || die "${dmg:t} is not notarized and stapled"
